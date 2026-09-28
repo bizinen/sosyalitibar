@@ -1,0 +1,55 @@
+name: CI
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: sosyal_itibar_test
+          POSTGRES_USER: sosyal_itibar
+          POSTGRES_PASSWORD: test-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sosyal_itibar -d sosyal_itibar_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://sosyal_itibar:test-password@127.0.0.1:5432/sosyal_itibar_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install
+        run: if [ -f package-lock.json ]; then npm ci; else npm install --no-audit --no-fund; fi
+      - name: Migrate test database
+        run: npm run db:migrate
+      - name: Database smoke test
+        run: npm run db:smoke
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+        env:
+          APP_URL: https://example.test
+          ADMIN_USERNAME: admin
+          ADMIN_PASSWORD_HASH: scrypt$16384$8$1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+          SESSION_SECRET: 1234567890123456789012345678901234567890
+          CRON_SECRET: 1234567890123456789012345678901234567890
+          AUDIT_HASH_SECRET: 1234567890123456789012345678901234567890
+          META_APP_ID: "1"
+          META_APP_SECRET: secret
+          # CI sentetik değeri; production Graph sürümü Meta Developer Dashboard'dan ayarlanır.
+          META_GRAPH_VERSION: v1.0
+          META_REDIRECT_URI: https://example.test/api/meta/callback
+          META_WEBHOOK_VERIFY_TOKEN: 12345678901234567890
+          TOKEN_ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+          LLM_API_KEY: test
+          LLM_MODEL: test
