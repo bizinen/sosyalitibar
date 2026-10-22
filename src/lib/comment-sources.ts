@@ -2,14 +2,18 @@ import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { commentDisplay } from "@/lib/comment-display";
 import { readSourceKey, sourceKey, type CommentParams } from "@/lib/comment-feed";
+import type { SourceScan } from "@/lib/source-scan";
+import { env } from "@/lib/config";
 
 type SourceRow = {
   platform: string; source_id: string | null; title: string | null; channel: string | null;
   permalink: string | null; comments: number; pending: number; risk: number;
   latest_at: string; cursor_at: string; total: number;
+  scan: SourceScan | null;
 };
 
 export async function commentSources(p: CommentParams, selected = false) {
+  const cfg = env();
   const source = selected ? readSourceKey(p.source) : null;
   if (selected && !source) return { rows: [], next: null, total: 0 };
   const platform = source?.platform ?? (["youtube", "instagram", "facebook"].includes(p.platform ?? "") ? p.platform : null);
@@ -43,9 +47,26 @@ export async function commentSources(p: CommentParams, selected = false) {
         coalesce(nullif(v.channel_name, ''), nullif(m.raw->>'source_channel', ''), c.display_name) as channel,
         coalesce(v.url, m.raw->'source_post'->>'permalink', m.raw->'source_post'->>'permalink_url') as permalink,
         coalesce(g.comments, 0) as comments, coalesce(g.pending, 0) as pending, coalesce(g.risk, 0) as risk,
-        coalesce(g.latest_at, v.created_at) as latest_at
+        coalesce(g.latest_at, v.created_at) as latest_at,
+        case when v.external_id is not null then jsonb_build_object(
+          'provider', v.provider, 'status', v.status, 'lastSyncedAt', v.last_synced_at,
+          'resultsLimit', v.results_limit, 'maxChargeCents', v.max_charge_cents,
+          'continuing', v.progress_encrypted is not null, 'lastError', v.last_error is not null,
+          'running', coalesce(v.locked_at > now() - interval '3 minutes', false),
+          'overdue', v.status = 'active' and v.available_at < now() - interval '5 minutes'
+            and (v.locked_at is null or v.locked_at < now() - interval '3 minutes'))
+        when c.id is not null then jsonb_build_object(
+          'provider', 'meta', 'status', case c.status when 'disabled' then 'paused' when 'revoked' then 'blocked' else c.status end,
+          'lastSyncedAt', c.last_synced_at, 'resultsLimit', 0, 'maxChargeCents', 0,
+          'continuing', c.sync_state->>'continuation' is not null, 'lastError', c.last_error is not null,
+          'running', coalesce(extract(epoch from (now() - c.sync_locked_at)) * 1000 < ${cfg.SYNC_LEASE_MS}, false),
+          'overdue', c.status in ('active', 'degraded')
+            and extract(epoch from (now() - coalesce(c.sync_attempted_at, c.created_at))) * 1000 > ${cfg.RECONCILE_INTERVAL_MS + 300000}
+            and (c.sync_locked_at is null or extract(epoch from (now() - c.sync_locked_at)) * 1000 > ${cfg.SYNC_LEASE_MS}))
+        else null end as scan
       from grouped g full join (
-        select platform, external_id, title, channel_name, url, created_at from watched_videos
+        select platform, external_id, title, channel_name, url, created_at, provider, status, last_synced_at,
+          results_limit, max_charge_cents, progress_encrypted, last_error, locked_at, available_at from watched_videos
         where status <> 'removed' ${connection ? sql`and false` : sql``}
           ${platform ? sql`and platform = ${platform}` : sql``}
           ${source ? source.id === null ? sql`and false` : sql`and external_id = ${source.id}` : sql``}

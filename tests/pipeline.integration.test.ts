@@ -719,6 +719,20 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
     expect(mocks.analyze).not.toHaveBeenCalled();
   });
 
+  it("exposes overdue source coverage without leaking source credentials or checkpoints", async () => {
+    await db.insert(watchedVideos).values({ platform: "instagram", provider: "apify", externalId: "public:instagram:AuditPost",
+      url: "https://www.instagram.com/p/AuditPost", apiKeyEncrypted: encryptSecret("do-not-expose"),
+      availableAt: new Date(Date.now() - 3600000), lastSyncedAt: new Date(Date.now() - 7200000) });
+    const page = await commentSources({});
+    expect(page.rows[0]?.scan).toMatchObject({ overdue: true, provider: "apify", resultsLimit: 1000, maxChargeCents: 100, running: false });
+    expect(JSON.stringify(page)).not.toContain("do-not-expose");
+    expect(JSON.stringify(page)).not.toContain("api_key_encrypted");
+    const connected = await connection("disabled");
+    await upsertSocialItem({ connectionId: connected.id, platform: "facebook", externalId: "meta-comment", rootExternalId: "meta-post", text: "sentetik" });
+    const metaPage = await commentSources({ platform: "facebook" });
+    expect(metaPage.rows[0]?.scan).toMatchObject({ provider: "meta", status: "paused" });
+  });
+
   it("accepts an OAuth nonce once, including parallel replay attempts", async () => {
     const state = await createOAuthState();
     const accepted = await Promise.all([consumeOAuthState(state), consumeOAuthState(state)]);

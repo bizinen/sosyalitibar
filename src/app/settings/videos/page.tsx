@@ -16,8 +16,10 @@ export default async function VideosPage() {
       lastError: watchedVideos.lastError, lastSyncedAt: watchedVideos.lastSyncedAt, lockedAt: watchedVideos.lockedAt,
       checkedAt: sql<number>`(extract(epoch from now()) * 1000)::float8`,
       continuing: sql<boolean>`${watchedVideos.progressEncrypted} is not null`,
-      count: sql<number>`(select count(*)::int from social_items i where i.platform = ${watchedVideos.platform}
-        and i.root_external_id = ${watchedVideos.externalId} and i.deleted_at is null)`,
+      overdue: sql<boolean>`${watchedVideos.status} = 'active' and ${watchedVideos.availableAt} < now() - interval '5 minutes'
+        and (${watchedVideos.lockedAt} is null or ${watchedVideos.lockedAt} < now() - interval '3 minutes')`,
+      count: sql<number>`(select count(*)::int from social_items i where i.platform = watched_videos.platform
+        and i.root_external_id = watched_videos.external_id and i.deleted_at is null)`,
     }).from(watchedVideos).where(ne(watchedVideos.status, "removed")).orderBy(desc(watchedVideos.createdAt)),
     db.select({ id: socialConnections.id, name: socialConnections.displayName, platform: socialConnections.platform })
       .from(socialConnections).where(eq(socialConnections.status, "active")).orderBy(asc(socialConnections.displayName)),
