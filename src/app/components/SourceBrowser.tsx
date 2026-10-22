@@ -3,6 +3,7 @@ import { CommentSource } from "@/app/components/CommentSource";
 import { commentSources } from "@/lib/comment-sources";
 import type { CommentParams } from "@/lib/comment-feed";
 import { sourceScanStatus } from "@/lib/source-scan";
+import { SourceCardActions } from "@/app/components/SourceCardActions";
 
 export async function SourceBrowser({ params, connections, selected = false }: {
   params: CommentParams; connections: { id: string; displayName: string }[]; selected?: boolean;
@@ -41,12 +42,13 @@ export async function SourceBrowser({ params, connections, selected = false }: {
       const platform = row.platform === "youtube" ? "YouTube" : row.platform === "instagram" ? "Instagram" : "Facebook";
       return <article className="source-tile" key={row.key}>
         <div className="source-tile-account"><span className={`review-platform ${row.platform}`}>{platform}</span><strong>{row.source_id === null ? "Kaynağı belirlenemeyen yorumlar" : row.channel || "Kanal bilgisi alınamadı"}</strong></div>
-        <CommentSource raw={row.source_id === null ? { source_post: { text: "Paylaşımı belirlenemeyen yorumlar" } } : row.raw} platform={row.platform} rootId={row.source_id} titleHref={commentHref(row.key)} />
+        <CommentSource raw={row.source_id === null ? { source_post: { text: "Paylaşımı belirlenemeyen yorumlar" } } : row.raw} platform={row.platform} rootId={row.source_id} titleHref={commentHref(row.key)} showPermalink={false} />
         <div className="source-tile-body"><div className="source-counts"><Link href={commentHref(row.key)} prefetch={false}><strong>{row.comments.toLocaleString("tr-TR")}</strong> alınan yorum</Link>
           <Link href={commentHref(row.key, "pending")} prefetch={false}><strong>{row.pending.toLocaleString("tr-TR")}</strong> inceleme bekleyen</Link>
           <Link className={row.risk > 0 ? "source-risk" : undefined} href={commentHref(row.key, "risk")} prefetch={false}><strong>{row.risk.toLocaleString("tr-TR")}</strong> yüksek öncelik</Link></div>
           <p className="source-date small muted">{row.comments ? "Son yorum alımı" : "İzlemeye eklendi"}: {new Date(row.latest_at).toLocaleString("tr-TR", { timeZone: "Europe/Istanbul", day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })}</p>
-          <Link className="btn" href={commentHref(row.key)} prefetch={false}>Yorumları incele</Link>
+          <SourceCardActions title={row.title?.split("\n")[0]?.slice(0, 500) || "Bu paylaşım"} commentsHref={commentHref(row.key)} permalink={row.raw.source_post.permalink} watch={row.watch}
+            settingsHref={row.watch ? `/settings/videos?video=${row.watch.id}#video-${row.watch.id}` : row.connection_id ? "/settings/meta" : "/settings/videos"} />
         </div>
       </article>;
     })}</div>

@@ -1,4 +1,4 @@
-type IconName = "comments" | "accounts" | "spark" | "bell" | "target" | "settings" | "plus" | "arrow" | "check" | "logout" | "shield";
+type IconName = "comments" | "accounts" | "spark" | "bell" | "target" | "settings" | "plus" | "arrow" | "check" | "logout" | "shield" | "more" | "external" | "pause" | "play" | "trash" | "refresh";
 
 const paths: Record<IconName, string> = {
   comments: "M21 11.5a8.4 8.4 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.4 8.4 0 0 1-3.8-.9L3 21l1.9-5.7a8.4 8.4 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.4 8.4 0 0 1 3.8-.9h.5a8.5 8.5 0 0 1 8 8v.5ZM8 10h8M8 14h5",
@@ -12,6 +12,12 @@ const paths: Record<IconName, string> = {
   check: "m5 12 4 4L19 6",
   logout: "M9 4H4v16h5M10 12h11m-4-4 4 4-4 4",
   shield: "M12 3 3 7v5c0 5 9 9 9 9s9-4 9-9V7l-9-4Zm-4 9 3 3 5-6",
+  more: "M12 4a1 1 0 1 0 0 2 1 1 0 0 0 0-2ZM12 11a1 1 0 1 0 0 2 1 1 0 0 0 0-2ZM12 18a1 1 0 1 0 0 2 1 1 0 0 0 0-2Z",
+  external: "M14 3h7v7M21 3l-9 9M10 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-5",
+  pause: "M8 5v14M16 5v14",
+  play: "m8 4 12 8-12 8V4Z",
+  trash: "M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7",
+  refresh: "M20 7v5h-5M4 17v-5h5M6.1 6.1A8 8 0 0 1 20 12M4 12a8 8 0 0 0 13.9 5.9",
 };
 
 export function UiIcon({ name, size = 20 }: { name: IconName; size?: number }) {

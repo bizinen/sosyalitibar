@@ -5,11 +5,14 @@ import { readSourceKey, sourceKey, type CommentParams } from "@/lib/comment-feed
 import type { SourceScan } from "@/lib/source-scan";
 import { env } from "@/lib/config";
 
+export type SourceWatch = { id: string; revision: number; status: string; provider: string; channelPaused: boolean; running: boolean; continuing: boolean };
+
 type SourceRow = {
   platform: string; source_id: string | null; title: string | null; channel: string | null;
   permalink: string | null; comments: number; pending: number; risk: number;
   latest_at: string; cursor_at: string; total: number;
   scan: SourceScan | null;
+  watch: SourceWatch | null; connection_id: string | null;
 };
 
 export async function commentSources(p: CommentParams, selected = false) {
@@ -50,6 +53,10 @@ export async function commentSources(p: CommentParams, selected = false) {
         coalesce(v.url, m.raw->'source_post'->>'permalink', m.raw->'source_post'->>'permalink_url') as permalink,
         coalesce(g.comments, 0) as comments, coalesce(g.pending, 0) as pending, coalesce(g.risk, 0) as risk,
         coalesce(g.latest_at, v.created_at) as latest_at,
+        c.id as connection_id,
+        case when v.id is not null then jsonb_build_object('id', v.id, 'revision', v.revision, 'status', v.status, 'provider', v.provider,
+          'channelPaused', coalesce(channel.status <> 'active', false), 'running', coalesce(v.locked_at > now() - interval '3 minutes', false),
+          'continuing', v.progress_encrypted is not null) else null end as watch,
         case when v.external_id is not null then jsonb_build_object(
           'provider', v.provider, 'status', case when channel.status <> 'active' then 'paused' else v.status end, 'lastSyncedAt', v.last_synced_at,
           'resultsLimit', v.results_limit, 'maxChargeCents', v.max_charge_cents,
@@ -67,7 +74,7 @@ export async function commentSources(p: CommentParams, selected = false) {
             and (c.sync_locked_at is null or extract(epoch from (now() - c.sync_locked_at)) * 1000 > ${cfg.SYNC_LEASE_MS}))
         else null end as scan
       from grouped g full join (
-        select platform, external_id, title, channel_name, url, created_at, provider, status, last_synced_at,
+        select id, revision, platform, external_id, title, channel_name, url, created_at, provider, status, last_synced_at,
           results_limit, max_charge_cents, progress_encrypted, last_error, locked_at, available_at, channel_id from watched_videos
         where status <> 'removed' and source_kind = 'video' ${connection ? sql`and false` : sql``}
           ${youtubeChannel ? sql`and channel_id = ${youtubeChannel}::uuid` : sql``}
