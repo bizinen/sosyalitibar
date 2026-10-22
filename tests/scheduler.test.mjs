@@ -52,12 +52,12 @@ describe("scheduler independent workers", () => {
     const controller = new AbortController();
     const running = runScheduler(controller.signal);
     await vi.advanceTimersByTimeAsync(9999);
-    expect(fetchMock).toHaveBeenCalledTimes(12);
+    expect(fetchMock).toHaveBeenCalledTimes(14);
     const heartbeats = fetchMock.mock.calls.filter(([url]) => url.endsWith("/heartbeat"));
-    expect(heartbeats).toHaveLength(6);
+    expect(heartbeats).toHaveLength(7);
     expect(heartbeats.every(([, init]) => JSON.parse(init.body).succeeded === false)).toBe(true);
     await vi.advanceTimersByTimeAsync(1);
-    expect(fetchMock).toHaveBeenCalledTimes(18);
+    expect(fetchMock).toHaveBeenCalledTimes(22);
     expect(console.error).toHaveBeenCalledWith(expect.stringContaining("worker.alerts_failed"));
     controller.abort();
     await running;

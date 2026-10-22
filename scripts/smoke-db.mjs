@@ -1,4 +1,6 @@
 import postgres from "postgres";
+import crypto from "node:crypto";
+import fs from "node:fs/promises";
 
 const url = process.env.DATABASE_URL;
 if (!url) throw new Error("DATABASE_URL gerekli");
@@ -28,6 +30,8 @@ try {
     "worker_heartbeats",
     "item_review_events",
     "item_translations",
+    "watched_videos",
+    "ai_policy",
   ];
 
   const tables = await sql`
@@ -38,13 +42,25 @@ try {
   const tableNames = new Set(tables.map((row) => row.table_name));
   for (const table of expectedTables) assert(tableNames.has(table), `eksik tablo: ${table}`);
 
-  const migrations = await sql`select name from _app_migrations order by name`;
-  assert(migrations.length >= 19, `beklenen migration sayısı >= 19, bulunan ${migrations.length}`);
+  const migrations = await sql`select name, checksum from _app_migrations order by name`;
+  const expectedMigrations = (await fs.readdir("migrations")).filter((name) => /^\d+.*\.sql$/.test(name)).sort();
+  assert(expectedMigrations.length > 0, "migration dosyaları bulunamadı");
+  for (const name of expectedMigrations) {
+    const applied = migrations.find((migration) => migration.name === name);
+    const checksum = crypto.createHash("sha256").update(await fs.readFile(`migrations/${name}`)).digest("hex");
+    assert(applied?.checksum === checksum, `migration eksik veya checksum farklı: ${name}`);
+  }
 
   const columns = await sql`select table_name, column_name from information_schema.columns
     where table_schema = 'public' and (table_name, column_name) in
-    (('social_items', 'analysis_revision'), ('social_items', 'source_read_version'), ('social_items', 'source_checked_at'), ('social_items', 'source_unavailable_at'), ('alert_outbox', 'analysis_revision'), ('alert_outbox', 'dispatch_started_at'), ('alert_outbox', 'receiver_key'))`;
-  assert(columns.length === 7, "source availability/read/analysis revision/dispatch/receiver columns eksik");
+    (('social_items', 'analysis_revision'), ('social_items', 'source_read_version'), ('social_items', 'source_checked_at'), ('social_items', 'source_unavailable_at'), ('alert_outbox', 'analysis_revision'), ('alert_outbox', 'dispatch_started_at'), ('alert_outbox', 'receiver_key'),
+     ('social_analyses', 'triage_label'), ('item_translations', 'prompt_hash'), ('ai_policy', 'settings'), ('ai_policy', 'revision'),
+     ('watched_videos', 'provider'), ('watched_videos', 'progress_encrypted'), ('watched_videos', 'poll_minutes'), ('watched_videos', 'lock_id'))`;
+  assert(columns.length === 15, "source/analysis/dispatch/triage/policy/video columns eksik");
+  const contracts = await sql`select conname from pg_constraint where contype = 'c' and convalidated
+    and ((conrelid = 'public.social_analyses'::regclass and conname = 'social_analyses_triage_contract')
+      or (conrelid = 'public.watched_videos'::regclass and conname = 'watched_videos_apify_platform_check'))`;
+  assert(contracts.length === 2, "triage veya video provider CHECK contract eksik");
 
   const [fk] = await sql`
     select rc.delete_rule
@@ -79,10 +95,12 @@ try {
         'social_connections_sync_claim_idx',
         'social_items_source_check_idx',
         'item_review_events_item_idx',
-        'item_translations_revision_uidx'
+        'item_translations_revision_uidx',
+        'watched_videos_queue_idx',
+        'social_analyses_triage_idx'
       )
   `;
-  assert(indexes.length === 11, `beklenen kritik index sayısı 11, bulunan ${indexes.length}`);
+  assert(indexes.length === 13, `beklenen kritik index sayısı 13, bulunan ${indexes.length}`);
 
   const [connectionTargetsUnique] = await sql`
     select count(*)::int as count

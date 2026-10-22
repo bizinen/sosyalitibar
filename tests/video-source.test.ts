@@ -2,17 +2,17 @@ import { expect, it } from "vitest";
 import { videoSource } from "@/lib/video-source";
 
 it.each([
-  "https://www.youtube.com/watch?v=dQw4w9WgXc&t=13",
-  "https://youtu.be/dQw4w9WgXc?si=tracking",
-  "https://www.youtube.com/shorts/dQw4w9WgXc",
-  "https://www.youtube.com/live/dQw4w9WgXc",
+  "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=13",
+  "https://youtu.be/dQw4w9WgXcQ?si=tracking",
+  "https://www.youtube.com/shorts/dQw4w9WgXcQ",
+  "https://www.youtube.com/live/dQw4w9WgXcQ",
 ])("deduplicates different links to the same YouTube video: %s", (url) => {
-  expect(videoSource("youtube", url)).toEqual({ externalId: "dQw4w9WgXc", url: "https://www.youtube.com/watch?v=dQw4w9WgXc" });
+  expect(videoSource("youtube", url)).toEqual({ externalId: "dQw4w9WgXcQ", url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" });
 });
 
-it.each(["https://youtube.com.evil.test/watch?v=dQw4w9WgXc", "https://www.youtube.com@evil.test/watch?v=dQw4w9WgXc",
-  "http://www.youtube.com/watch?v=dQw4w9WgXc", "https://www.youtube.com:8443/watch?v=dQw4w9WgXc",
-  "https://www.youtube.com/playlist?list=dQw4w9WgXc", "https://www.instagram.com/reel/dQw4w9WgXc/",
+it.each(["https://youtube.com.evil.test/watch?v=dQw4w9WgXcQ", "https://www.youtube.com@evil.test/watch?v=dQw4w9WgXcQ",
+  "http://www.youtube.com/watch?v=dQw4w9WgXcQ", "https://www.youtube.com:8443/watch?v=dQw4w9WgXcQ",
+  "https://www.youtube.com/playlist?list=dQw4w9WgXcQ", "https://www.instagram.com/reel/dQw4w9WgXcQ/",
 ])("rejects an unsafe or non-video YouTube link: %s", (url) => {
   expect(() => videoSource("youtube", url)).toThrow("invalid_video_url");
 });

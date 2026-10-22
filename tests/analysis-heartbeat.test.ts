@@ -13,7 +13,7 @@ vi.mock("@/lib/db", () => {
 });
 vi.mock("@/lib/llm", () => ({ analyzeComment: mocks.analyze, PROMPT_VERSION: "test" }));
 vi.mock("@/lib/alerts", () => ({ enqueueAlertIfNeeded: vi.fn() }));
-vi.mock("@/lib/log", () => ({ log: { warn: vi.fn() } }));
+vi.mock("@/lib/log", async (original) => ({ ...await original<typeof import("@/lib/log")>(), log: { warn: vi.fn() } }));
 
 import { analyzeClaimedItem } from "@/lib/ingest";
 
