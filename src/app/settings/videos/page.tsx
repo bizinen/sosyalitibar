@@ -6,9 +6,13 @@ import { socialConnections, watchedVideos } from "@/db/schema";
 import { AdminNav } from "@/app/components/AdminNav";
 import { WatchedVideos } from "@/app/components/WatchedVideos";
 import { getYouTubeSettings } from "@/lib/youtube-settings";
+import Link from "next/link";
+import { z } from "zod";
 
-export default async function VideosPage() {
+export default async function VideosPage({ searchParams }: { searchParams: Promise<{ video?: string }> }) {
   if (!(await isAdmin())) redirect("/login");
+  const requested = (await searchParams).video;
+  const selectedId = z.string().uuid().safeParse(requested).success ? requested : undefined;
   const [videos, connections] = await Promise.all([
     db.select({ id: watchedVideos.id, platform: watchedVideos.platform, url: watchedVideos.url, title: watchedVideos.title,
       channelName: watchedVideos.channelName, status: watchedVideos.status, revision: watchedVideos.revision,
@@ -22,16 +26,17 @@ export default async function VideosPage() {
         and (${watchedVideos.lockedAt} is null or ${watchedVideos.lockedAt} < now() - interval '3 minutes')`,
       count: sql<number>`(select count(*)::int from social_items i where i.platform = watched_videos.platform
         and i.root_external_id = watched_videos.external_id and i.deleted_at is null)`,
-    }).from(watchedVideos).where(and(ne(watchedVideos.status, "removed"), eq(watchedVideos.sourceKind, "video"))).orderBy(desc(watchedVideos.createdAt)),
+    }).from(watchedVideos).where(and(ne(watchedVideos.status, "removed"), eq(watchedVideos.sourceKind, "video"), selectedId ? eq(watchedVideos.id, selectedId) : undefined)).orderBy(desc(watchedVideos.createdAt)),
     db.select({ id: socialConnections.id, name: socialConnections.displayName, platform: socialConnections.platform })
       .from(socialConnections).where(eq(socialConnections.status, "active")).orderBy(asc(socialConnections.displayName)),
   ]);
+  if (selectedId && !videos.length) redirect("/settings/videos");
   const key = await getYouTubeSettings();
   const [apifyKey] = await db.select({ id: watchedVideos.id }).from(watchedVideos)
     .where(sql`${watchedVideos.provider} = 'apify' and ${watchedVideos.apiKeyEncrypted} is not null`).limit(1);
   return <div className="shell"><AdminNav /><main className="container">
-    <div className="page-head"><div><h1>İzlenen videolar</h1><p className="muted">Başka kanallardaki video ve paylaşımların yorumlarını tek yerde takip et.</p></div></div>
-    <WatchedVideos videos={videos.map((video) => ({ ...video, status: video.channelPaused ? "paused" : video.status, overdue: !video.channelPaused && video.overdue, lastSyncedAt: video.lastSyncedAt?.toISOString() ?? null,
+    <div className="page-head"><div><h1>{selectedId ? "Paylaşımın takip ayarları" : "İzlenen videolar"}</h1><p className="muted">{selectedId ? "Bu paylaşımın yorum alımını ve takip durumunu yönet." : "Başka kanallardaki video ve paylaşımların yorumlarını tek yerde takip et."}</p></div>{selectedId ? <Link className="btn" href="/settings/videos">Tüm izlenen videolar</Link> : null}</div>
+    <WatchedVideos showAddForm={!selectedId} videos={videos.map((video) => ({ ...video, status: video.channelPaused ? "paused" : video.status, overdue: !video.channelPaused && video.overdue, lastSyncedAt: video.lastSyncedAt?.toISOString() ?? null,
       lockedAt: video.lockedAt?.toISOString() ?? null }))} connections={connections} hasYouTubeKey={Boolean(key)} hasApifyKey={Boolean(apifyKey)} checkedAt={videos[0]?.checkedAt ?? 0} />
   </main></div>;
 }

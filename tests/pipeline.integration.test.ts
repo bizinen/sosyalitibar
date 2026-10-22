@@ -732,12 +732,24 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
       availableAt: new Date(Date.now() - 3600000), lastSyncedAt: new Date(Date.now() - 7200000) });
     const page = await commentSources({});
     expect(page.rows[0]?.scan).toMatchObject({ overdue: true, provider: "apify", resultsLimit: 1000, maxChargeCents: 100, running: false });
+    expect(page.rows[0]?.watch).toMatchObject({ revision: 1, status: "active", provider: "apify", channelPaused: false, running: false });
     expect(JSON.stringify(page)).not.toContain("do-not-expose");
     expect(JSON.stringify(page)).not.toContain("api_key_encrypted");
     const connected = await connection("disabled");
     await upsertSocialItem({ connectionId: connected.id, platform: "facebook", externalId: "meta-comment", rootExternalId: "meta-post", text: "sentetik" });
     const metaPage = await commentSources({ platform: "facebook" });
     expect(metaPage.rows[0]?.scan).toMatchObject({ provider: "meta", status: "paused" });
+    expect(metaPage.rows[0]?.watch).toBeNull();
+    expect(metaPage.rows[0]?.connection_id).toBe(connected.id);
+  });
+
+  it("opens source settings for exactly the requested tracking record", async () => {
+    const rows = await db.insert(watchedVideos).values(["dQw4w9WgXcQ", "7vk8aYpKBT0"].map(externalId => ({ platform: "youtube", externalId,
+      url: `https://www.youtube.com/watch?v=${externalId}`, title: externalId }))).returning();
+    const page = await VideosPage({ searchParams: Promise.resolve({ video: rows[0]!.id }) });
+    const videos = page.props.children[1].props.children[1].props.videos as Array<{ id: string }>;
+    expect(videos.map(video => video.id)).toEqual([rows[0]!.id]);
+    expect(page.props.children[1].props.children[1].props.showAddForm).toBe(false);
   });
 
   it.each([false, true])("blocks cursor cycles, including across worker checkpoints: %s", async (acrossRuns) => {
@@ -792,7 +804,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
     }));
     expect((await collectWatchedVideos())[0]).toMatchObject({ completed: true });
     expect(await db.select().from(socialItems)).toHaveLength(2);
-    const page = await VideosPage();
+    const page = await VideosPage({ searchParams: Promise.resolve({}) });
     const videos = page.props.children[1].props.children[1].props.videos as Array<{ count: number }>;
     expect(videos[0]?.count).toBe(2);
   });

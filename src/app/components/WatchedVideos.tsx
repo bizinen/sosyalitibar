@@ -34,8 +34,8 @@ function sourceError(code: string) {
   return errors[code] ?? "Yorumlar alınamadı. Kaynak bağlantısını kontrol edip tekrar dene.";
 }
 
-export function WatchedVideos({ videos, connections, hasYouTubeKey, hasApifyKey, checkedAt }: { videos: Video[];
-  connections: { id: string; name: string; platform: string }[]; hasYouTubeKey: boolean; hasApifyKey: boolean; checkedAt: number }) {
+export function WatchedVideos({ videos, connections, hasYouTubeKey, hasApifyKey, checkedAt, showAddForm = true }: { videos: Video[];
+  connections: { id: string; name: string; platform: string }[]; hasYouTubeKey: boolean; hasApifyKey: boolean; checkedAt: number; showAddForm?: boolean }) {
   const router = useRouter();
   const [platform, setPlatform] = useState<VideoPlatform>("youtube");
   const [url, setUrl] = useState("");
@@ -98,7 +98,7 @@ export function WatchedVideos({ videos, connections, hasYouTubeKey, hasApifyKey,
     finally { setBusy(null); }
   }
   return <>
-    <section className="panel"><div className="panel-head"><h2>Video veya paylaşım ekle</h2><UiIcon name="plus" /></div>
+    {showAddForm ? <section className="panel"><div className="panel-head"><h2>Video veya paylaşım ekle</h2><UiIcon name="plus" /></div>
       <form className="panel-body" onSubmit={add}><fieldset className="llm-fields" disabled={busy !== null}>
         <label>Platform<select className="input" value={platform} onChange={(event) => { setPlatform(event.target.value as VideoPlatform); setConnectionId(""); setResourceId(""); setKey(""); setError(""); }}>
           {Object.entries(platforms).map(([id, label]) => <option key={id} value={id}>{label}</option>)}</select></label>
@@ -123,14 +123,14 @@ export function WatchedVideos({ videos, connections, hasYouTubeKey, hasApifyKey,
           <a className="small" href="https://console.apify.com/settings/integrations" target="_blank" rel="noopener noreferrer">Apify API tokenını al ↗</a>
         </> : null}
         <button className="btn primary" type="submit" disabled={platform === "youtube" && !hasYouTubeKey}>{busy === "add" ? "Ekleniyor…" : "İzlemeye ekle"}</button>
-      </fieldset></form></section>
+      </fieldset></form></section> : null}
     {error ? <div className="notice" role="alert" style={{ marginTop: 16 }}>{error}</div> : null}
     {message ? <p className="small" role="status">{message}</p> : null}
     <div className="feed-head"><h2>İzleme listesi <span className="badge">{videos.length}</span></h2><button className="btn" disabled={busy !== null} onClick={() => router.refresh()}>Yenile</button></div>
     {videos.length === 0 ? <section className="panel empty"><UiIcon name="comments" size={28} /><h2>İlk videoyu ekle.</h2><p>Video bağlantısını gir; alınan yorumlar mevcut inceleme ekranında görünsün.</p></section> : <div className="watched-video-grid">{videos.map((video) => {
       const running = video.lockedAt && Math.max(now, checkedAt) - Date.parse(video.lockedAt) < 180000;
       const scan = sourceScanStatus({ ...video, running: Boolean(running), lastError: Boolean(video.lastError) });
-      return <article className="panel watched-video-card" key={video.id}>
+      return <article className="panel watched-video-card" key={video.id} id={`video-${video.id}`}>
         <div className="watched-video-meta"><span className={`review-platform ${video.platform}`}>{platforms[video.platform as VideoPlatform]}</span><span className={`badge ${scan.warning ? "warn" : video.status === "paused" ? "" : "blue"}`}>{scan.label}</span></div>
         <h3><a href={video.url} target="_blank" rel="noopener noreferrer">{video.title || "Video / paylaşım"}<UiIcon name="arrow" size={15} /></a></h3>
         <a className="small muted" href={video.url} target="_blank" rel="noopener noreferrer" style={{ overflowWrap: "anywhere" }}>{video.url}</a>
