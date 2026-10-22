@@ -4,7 +4,7 @@ import { db } from "@/lib/db";
 import { socialAnalyses, socialConnections, socialItems } from "@/db/schema";
 import { decodeItemCursor } from "@/lib/cursor";
 
-export type CommentParams = { mode?: string; source?: string; sourceQ?: string; sourceAfter?: string; video?: string; platform?: string; sentiment?: string; category?: string; minSeverity?: string; review?: string; needsReview?: string; q?: string; cursor?: string; connection?: string; target?: string; from?: string; to?: string; analysis?: string; connected?: string; meta_error?: string; view?: string };
+export type CommentParams = { mode?: string; source?: string; sourceQ?: string; sourceAfter?: string; sourceSort?: string; sourceFilter?: string; video?: string; platform?: string; sentiment?: string; category?: string; minSeverity?: string; review?: string; needsReview?: string; q?: string; cursor?: string; connection?: string; target?: string; from?: string; to?: string; analysis?: string; connected?: string; meta_error?: string; view?: string };
 
 export function sourceKey(platform: string, id: string | null) {
   return Buffer.from(JSON.stringify([platform, id]), "utf8").toString("base64url");

@@ -1,9 +1,10 @@
 import Link from "next/link";
 import { CommentSource } from "@/app/components/CommentSource";
-import { commentSources } from "@/lib/comment-sources";
+import { commentSources, sourceSortOptions, sourceFilterOptions } from "@/lib/comment-sources";
 import type { CommentParams } from "@/lib/comment-feed";
 import { sourceScanStatus } from "@/lib/source-scan";
 import { SourceCardActions } from "@/app/components/SourceCardActions";
+import { UiIcon } from "@/app/components/UiIcon";
 
 export async function SourceBrowser({ params, connections, selected = false }: {
   params: CommentParams; connections: { id: string; displayName: string }[]; selected?: boolean;
@@ -11,7 +12,7 @@ export async function SourceBrowser({ params, connections, selected = false }: {
   const page = await commentSources(params, selected);
   function href(values: Record<string, string | undefined>) {
     const next = new URLSearchParams();
-    for (const key of ["platform", "connection", "sourceQ", "sourceAfter"] as const) if (params[key]) next.set(key, params[key]!);
+    for (const key of ["platform", "connection", "sourceQ", "sourceSort", "sourceFilter", "sourceAfter"] as const) if (params[key]) next.set(key, params[key]!);
     for (const [key, value] of Object.entries(values)) { if (value) next.set(key, value); else next.delete(key); }
     return `/?${next}`;
   }
@@ -29,14 +30,18 @@ export async function SourceBrowser({ params, connections, selected = false }: {
   }
   return <section className="source-browser" aria-label="Paylaşım kütüphanesi">
     <div className="feed-head"><div><h2>Hangi paylaşımı inceleyeceksin?</h2><p className="section-description">Hesaplardan yorum alınan paylaşımlar ve izlemeye eklediğin videolar.</p></div></div>
-    <form className="source-search" method="get">
+    <form className="source-search" method="get" action="/" aria-label="Paylaşım filtreleri">
       <input type="hidden" name="mode" value="sources" />
-      <label>Paylaşım veya kanal ara<input className="input" name="sourceQ" defaultValue={params.sourceQ ?? ""} maxLength={120} placeholder="Başlık, kanal adı, bağlantı veya paylaşım kimliği" /></label>
-      <label>Platform<select className="select" name="platform" defaultValue={params.platform ?? ""}><option value="">Tüm platformlar</option><option value="youtube">YouTube</option><option value="instagram">Instagram</option><option value="facebook">Facebook</option></select></label>
-      <label>Bağlı hesap<select className="select" name="connection" defaultValue={params.connection ?? ""}><option value="">Tüm kaynaklar</option>{connections.map((connection) => <option key={connection.id} value={connection.id}>{connection.displayName}</option>)}</select></label>
-      <button className="btn primary" type="submit">Paylaşım bul</button>
+      <div className="source-search-main"><label>Paylaşım veya kanal ara<div className="source-search-input"><UiIcon name="search" size={17} /><input className="input" name="sourceQ" defaultValue={params.sourceQ ?? ""} maxLength={120} placeholder="Başlık, kanal veya paylaşım bağlantısı" /></div></label>
+        <button className="btn source-search-submit" type="submit"><UiIcon name="search" size={16} />Paylaşımları bul</button></div>
+      <div className="source-search-filters">
+        <label><span><UiIcon name="target" size={14} />Platform</span><select className="select" name="platform" defaultValue={params.platform ?? ""}><option value="">Tüm platformlar</option><option value="youtube">YouTube</option><option value="instagram">Instagram</option><option value="facebook">Facebook</option></select></label>
+        <label><span><UiIcon name="accounts" size={14} />Bağlı hesap</span><select className="select" name="connection" defaultValue={params.connection ?? ""}><option value="">Tüm kaynaklar</option>{connections.map((connection) => <option key={connection.id} value={connection.id}>{connection.displayName}</option>)}</select></label>
+        <label><span><UiIcon name="sort" size={14} />Sıralama</span><select className="select" name="sourceSort" defaultValue={page.sort}>{sourceSortOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+        <label><span><UiIcon name="filter" size={14} />Yorum durumu</span><select className="select" name="sourceFilter" defaultValue={page.filter}>{sourceFilterOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+      </div>
     </form>
-    <div className="source-results-head"><span>{page.total.toLocaleString("tr-TR")} paylaşım grubu · Son yorum alınan önce</span><Link className="text-link" href="/?mode=sources">Filtreleri temizle</Link></div>
+    <div className="source-results-head"><span><strong>{page.total.toLocaleString("tr-TR")} paylaşım</strong><span className="source-sort-description">{sourceSortOptions.find(option => option.value === page.sort)!.label}</span></span><Link className="text-link" href="/?mode=sources"><UiIcon name="refresh" size={14} />Filtreleri temizle</Link></div>
     {!page.rows.length ? <div className="empty"><h3>Bu görünümde paylaşım yok.</h3><p>{params.sourceAfter ? "Liste değişmiş olabilir. İlk sayfaya dönüp yeniden ara." : "Aramayı veya hesap filtresini değiştir. Henüz kaynak eklemediysen izleme listesinden video ekleyebilirsin."}</p><Link className="btn" href={params.sourceAfter ? href({ mode: "sources", sourceAfter: undefined }) : "/settings/videos"}>{params.sourceAfter ? "İlk sayfaya dön" : "Video izleme listesi"}</Link></div> : null}
     <div className="source-grid">{page.rows.map((row) => {
       const platform = row.platform === "youtube" ? "YouTube" : row.platform === "instagram" ? "Instagram" : "Facebook";
