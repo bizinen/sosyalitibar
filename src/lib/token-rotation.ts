@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { alertSettings, llmSettings, metaSettings, metaAuthAccounts, socialConnections, watchedVideos } from "@/db/schema";
+import { alertSettings, llmSettings, metaSettings, metaAuthAccounts, socialConnections, watchedVideos, youtubeSettings } from "@/db/schema";
 import { db } from "@/lib/db";
 import { currentSecretPrefix, decryptSecret, encryptSecret, secretNeedsRotation } from "@/lib/crypto";
 
@@ -10,6 +10,7 @@ export async function rotateStoredTokens() {
     [metaAuthAccounts, metaAuthAccounts.encryptedUserAccessToken],
     [socialConnections, socialConnections.encryptedAccessToken],
     [llmSettings, llmSettings.apiKeyEncrypted],
+    [youtubeSettings, youtubeSettings.apiKeyEncrypted],
     [watchedVideos, watchedVideos.apiKeyEncrypted],
     [watchedVideos, watchedVideos.progressEncrypted],
     [metaSettings, metaSettings.appSecretEncrypted],

@@ -31,7 +31,10 @@ export default async function Home({ searchParams }: { searchParams: Promise<Par
     needsReview: sql<number>`count(*) filter (where ${socialAnalyses.needsReview} is true and ${socialItems.reviewStatus} = 'new')::int`,
   }).from(socialItems).leftJoin(socialAnalyses, eq(socialAnalyses.itemId, socialItems.id)).where(isNull(socialItems.deletedAt));
 
-  const connections = await db.select().from(socialConnections);
+  const metaConnections = await db.select().from(socialConnections);
+  const youtubeChannels = await db.select({ id: watchedVideos.id, title: watchedVideos.title }).from(watchedVideos)
+    .where(and(eq(watchedVideos.sourceKind, "channel"), sql`${watchedVideos.status} <> 'removed'`));
+  const connections = [...metaConnections, ...youtubeChannels.map(channel => ({ id: `youtube:${channel.id}`, displayName: `YouTube · ${channel.title || "Kanal"}` }))];
   const targets = showSources ? [] : await db.select({ id: monitoringTargets.id, name: monitoringTargets.name }).from(monitoringTargets);
   const updatesStartedAt = new Date();
   const [newest] = showSources ? [] : await db.select({ id: socialItems.id, at: socialItems.ingestedAt,
@@ -48,7 +51,7 @@ export default async function Home({ searchParams }: { searchParams: Promise<Par
   const callbackError = p.meta_error === "oauth_denied" ? "Meta bağlantısına izin verilmedi." : p.meta_error === "no_pages" ? "Meta erişilebilir sayfa döndürmedi. Facebook hesabının sayfa erişimini, pages_show_list iznini ve Meta izin ekranındaki hesap seçimini kontrol et." : p.meta_error === "connect_failed" ? "Meta bağlantısı tamamlanamadı. Bağlantı ayarlarından tekrar deneyin." : null;
   const stats = statsRow || { total: 0, normal: 0, critical: 0, needsReview: 0 };
   const advancedFilters = Boolean(p.sentiment || p.category || p.review || p.needsReview || p.target || p.analysis || p.from || p.to || minSeverity);
-  const views = [["", "Tüm yorumlar"], ["pending", "İnceleme bekleyen"], ["urgent", "Acil inceleme"], ["normal", "İnceleme gerekmeyen"], ["risk", "Yüksek öncelik"], ["threats", "Eski analiz: tehdit"], ["confirmed", "İnsan onaylı saldırılar"], ["failed", "Analizi başarısız"], ["unavailable", "Kaynağa erişilemiyor"], ["human", "İnsan değerlendirmesi olan"]];
+  const views = [["", "Tüm yorumlar"], ["pending", "İnceleme bekleyen"], ["urgent", "Acil inceleme"], ["normal", "İnceleme gerekmeyen"], ["risk", "Yüksek öncelik"], ["threats", "Eski analiz: tehdit"], ["confirmed", "İnsan onaylı saldırılar"], ["history", "Geçmiş arşivi · AI yok"], ["failed", "Analizi başarısız"], ["unavailable", "Kaynağa erişilemiyor"], ["human", "İnsan değerlendirmesi olan"]];
   function viewHref(view: string) {
     const params = new URLSearchParams({ mode: "comments" });
     for (const key of ["source", "sourceQ", "sourceAfter", "video", "q", "platform", "connection", "target", "from", "to"] as const) if (p[key]) params.set(key, p[key]!);

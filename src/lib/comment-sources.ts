@@ -18,6 +18,7 @@ export async function commentSources(p: CommentParams, selected = false) {
   if (selected && !source) return { rows: [], next: null, total: 0 };
   const platform = source?.platform ?? (["youtube", "instagram", "facebook"].includes(p.platform ?? "") ? p.platform : null);
   const connection = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(p.connection ?? "") ? p.connection : null;
+  const youtubeChannel = /^youtube:[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(p.connection ?? "") ? p.connection!.slice(8) : null;
   const query = selected ? "" : p.sourceQ?.trim().slice(0, 120) ?? "";
   let after: { at: string; platform: string; id: string } | null = null;
   if (!selected && p.sourceAfter && p.sourceAfter.length <= 2048) {
@@ -39,6 +40,7 @@ export async function commentSources(p: CommentParams, selected = false) {
       where i.deleted_at is null
         ${platform ? sql`and i.platform = ${platform}` : sql``}
         ${connection ? sql`and i.connection_id = ${connection}::uuid` : sql``}
+        ${youtubeChannel ? sql`and exists (select 1 from watched_videos w where w.channel_id = ${youtubeChannel}::uuid and w.platform = i.platform and w.external_id = i.root_external_id)` : sql``}
         ${source ? source.id === null ? sql`and i.root_external_id is null` : sql`and i.root_external_id = ${source.id}` : sql``}
       group by i.platform, i.root_external_id
     ), sources as (
@@ -49,11 +51,11 @@ export async function commentSources(p: CommentParams, selected = false) {
         coalesce(g.comments, 0) as comments, coalesce(g.pending, 0) as pending, coalesce(g.risk, 0) as risk,
         coalesce(g.latest_at, v.created_at) as latest_at,
         case when v.external_id is not null then jsonb_build_object(
-          'provider', v.provider, 'status', v.status, 'lastSyncedAt', v.last_synced_at,
+          'provider', v.provider, 'status', case when channel.status <> 'active' then 'paused' else v.status end, 'lastSyncedAt', v.last_synced_at,
           'resultsLimit', v.results_limit, 'maxChargeCents', v.max_charge_cents,
           'continuing', v.progress_encrypted is not null, 'lastError', v.last_error is not null,
           'running', coalesce(v.locked_at > now() - interval '3 minutes', false),
-          'overdue', v.status = 'active' and v.available_at < now() - interval '5 minutes'
+          'overdue', v.status = 'active' and (channel.id is null or channel.status = 'active') and v.available_at < now() - interval '5 minutes'
             and (v.locked_at is null or v.locked_at < now() - interval '3 minutes'))
         when c.id is not null then jsonb_build_object(
           'provider', 'meta', 'status', case c.status when 'disabled' then 'paused' when 'revoked' then 'blocked' else c.status end,
@@ -66,11 +68,13 @@ export async function commentSources(p: CommentParams, selected = false) {
         else null end as scan
       from grouped g full join (
         select platform, external_id, title, channel_name, url, created_at, provider, status, last_synced_at,
-          results_limit, max_charge_cents, progress_encrypted, last_error, locked_at, available_at from watched_videos
-        where status <> 'removed' ${connection ? sql`and false` : sql``}
+          results_limit, max_charge_cents, progress_encrypted, last_error, locked_at, available_at, channel_id from watched_videos
+        where status <> 'removed' and source_kind = 'video' ${connection ? sql`and false` : sql``}
+          ${youtubeChannel ? sql`and channel_id = ${youtubeChannel}::uuid` : sql``}
           ${platform ? sql`and platform = ${platform}` : sql``}
           ${source ? source.id === null ? sql`and false` : sql`and external_id = ${source.id}` : sql``}
       ) v on v.platform = g.platform and v.external_id = g.source_id
+      left join watched_videos channel on channel.id = v.channel_id
       left join lateral (
         select i.raw, i.connection_id from social_items i
         where i.platform = g.platform and (i.root_external_id = g.source_id or (i.root_external_id is null and g.source_id is null))

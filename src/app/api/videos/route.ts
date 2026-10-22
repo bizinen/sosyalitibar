@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { and, desc, eq, isNotNull, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { auditLogs, socialConnections, watchedVideos } from "@/db/schema";
+import { auditLogs, socialConnections, watchedVideos, youtubeSettings } from "@/db/schema";
 import { isAdmin } from "@/lib/auth";
 import { assertSameOrigin } from "@/lib/security";
 import { readResponseBody } from "@/lib/http-body";
@@ -29,6 +29,7 @@ export async function POST(req: Request) {
   if (!parsed.success) return NextResponse.json({ error: "invalid_body" }, { status: 400 });
   const value = parsed.data;
   if (value.provider === "apify" && value.platform === "youtube") return NextResponse.json({ error: "invalid_provider" }, { status: 400 });
+  if (value.platform === "youtube" && value.apiKey) return NextResponse.json({ error: "use_youtube_settings" }, { status: 400 });
   let source: ReturnType<typeof videoSource>;
   try { source = videoSource(value.platform, value.url, value.resourceId, value.provider === "apify"); }
   catch (error) { return NextResponse.json({ error: error instanceof Error ? error.message : "invalid_video_url" }, { status: 400 }); }
@@ -36,12 +37,14 @@ export async function POST(req: Request) {
     const result = await db.transaction(async (tx) => {
       await tx.execute(sql`select pg_advisory_xact_lock(hashtext('sosyal_itibar_videos'))`);
       let encrypted: string | null = null;
-      if (value.platform === "youtube" || value.provider === "apify") {
+      if (value.platform === "youtube") {
+        const [settings] = await tx.select({ id: youtubeSettings.id }).from(youtubeSettings).where(eq(youtubeSettings.id, "primary"));
+        if (!settings) return { error: "youtube_key_required" };
+      } else if (value.provider === "apify") {
         const [saved] = await tx.select({ key: watchedVideos.apiKeyEncrypted }).from(watchedVideos)
-          .where(and(eq(watchedVideos.provider, value.provider), ...(value.provider === "official" ? [eq(watchedVideos.platform, "youtube")] : []),
-            isNotNull(watchedVideos.apiKeyEncrypted))).orderBy(desc(watchedVideos.updatedAt)).limit(1);
+          .where(and(eq(watchedVideos.provider, "apify"), isNotNull(watchedVideos.apiKeyEncrypted))).orderBy(desc(watchedVideos.updatedAt)).limit(1);
         encrypted = value.apiKey ? encryptSecret(value.apiKey) : saved?.key ?? null;
-        if (!encrypted) return { error: value.provider === "apify" ? "apify_key_required" : "youtube_key_required" };
+        if (!encrypted) return { error: "apify_key_required" };
       } else {
         if (!value.connectionId) return { error: "meta_connection_required" };
         const [connection] = await tx.select().from(socialConnections).where(eq(socialConnections.id, value.connectionId)).for("share");
@@ -52,6 +55,7 @@ export async function POST(req: Request) {
         .orderBy(sql`${watchedVideos.status} = 'removed'`).for("update");
       if (existing && existing.status !== "removed") return { error: "video_exists" };
       const fields = { ...source, platform: value.platform, apiKeyEncrypted: encrypted,
+        sourceKind: "video", channelId: null, analysisAfter: existing?.analysisAfter ?? null,
         provider: value.provider, resultsLimit: value.resultsLimit, pollMinutes: value.pollMinutes, maxChargeCents: value.maxChargeCents,
         sourceText: value.sourceText || null, channelName: value.channelName || null,
         title: value.provider === "apify" ? value.sourceText?.split("\n")[0]?.slice(0, 500) || null : null, lastRunId: null, lastRunCount: null,

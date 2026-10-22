@@ -15,7 +15,7 @@ export async function invalidateAnalyses(tx: Transaction, filter?: SQL) {
     with locked as materialized (
       select id from social_items where ${condition} order by id for update
     ), changed as (
-      update social_items set analysis_status = 'pending', analysis_attempts = 0,
+      update social_items set analysis_status = case when analysis_excluded then 'complete' else 'pending' end, analysis_attempts = 0,
         analysis_available_at = now(), analysis_locked_at = null, analysis_lock_id = null,
         analysis_error = null, review_status = 'new', analysis_revision = analysis_revision + 1, updated_at = now()
       from locked where social_items.id = locked.id returning social_items.id

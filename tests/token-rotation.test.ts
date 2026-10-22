@@ -26,6 +26,7 @@ describe("maintenance token rotation", () => {
     const disabled = { status: "disabled", ciphertext: encryptSecret("page-token") };
     const continuation = encryptSecret('{"tasks":[],"private":"cursor-token"}');
     const apiKey = encryptSecret("llm-key");
+    const youtubeKey = encryptSecret("youtube-key");
     const appSecret = encryptSecret("app-secret");
     const verifyToken = encryptSecret("verify-token");
     const videoKey = encryptSecret("video-key");
@@ -35,7 +36,7 @@ describe("maintenance token rotation", () => {
     const rotated: string[] = [];
     mocks.execute.mockImplementation(async (statement: SQL) => {
       const query = new PgDialect().sqlToQuery(statement);
-      const ciphertext = query.sql.includes("sync_state") ? continuation : query.sql.includes("meta_auth_accounts") ? owner : query.sql.includes("llm_settings") ? apiKey : query.sql.includes("watched_videos") ? query.sql.includes("progress_encrypted") ? videoProgress : videoKey : query.sql.includes("app_secret_encrypted") ? appSecret : query.sql.includes("verify_token_encrypted") ? verifyToken : query.sql.includes("alert_settings") ? alertSecret : disabled.ciphertext;
+      const ciphertext = query.sql.includes("sync_state") ? continuation : query.sql.includes("meta_auth_accounts") ? owner : query.sql.includes("llm_settings") ? apiKey : query.sql.includes("youtube_settings") ? youtubeKey : query.sql.includes("watched_videos") ? query.sql.includes("progress_encrypted") ? videoProgress : videoKey : query.sql.includes("app_secret_encrypted") ? appSecret : query.sql.includes("verify_token_encrypted") ? verifyToken : query.sql.includes("alert_settings") ? alertSecret : disabled.ciphertext;
       if (query.sql.includes("select count")) return [{ count: 0 }];
       if (query.sql.includes("select id")) {
         expect(query.sql).toContain("limit 100");
@@ -48,9 +49,9 @@ describe("maintenance token rotation", () => {
       rotated.push(String(query.params[0]));
       return [{ id: "id" }];
     });
-    expect(await rotateStoredTokens()).toEqual({ rotated: 9, failed: 0, remaining: 0 });
+    expect(await rotateStoredTokens()).toEqual({ rotated: 10, failed: 0, remaining: 0 });
     mocks.config.TOKEN_ENCRYPTION_KEY_PREVIOUS = undefined;
-    expect(rotated.map(decryptSecret)).toEqual(["owner-token", "page-token", "llm-key", "video-key", '{"phase":"dataset","offset":100}', "app-secret", "verify-token", "alert-secret", '{"tasks":[],"private":"cursor-token"}']);
+    expect(rotated.map(decryptSecret)).toEqual(["owner-token", "page-token", "llm-key", "youtube-key", "video-key", '{"phase":"dataset","offset":100}', "app-secret", "verify-token", "alert-secret", '{"tasks":[],"private":"cursor-token"}']);
     expect(disabled.status).toBe("disabled");
   });
 

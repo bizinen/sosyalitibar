@@ -9,12 +9,12 @@ import { sourceScanStatus } from "@/lib/source-scan";
 
 type Video = { id: string; platform: string; url: string; title: string | null; channelName: string | null;
   provider: string; resultsLimit: number; pollMinutes: number; maxChargeCents: number; lastRunId: string | null; lastRunCount: number | null;
-  status: string; revision: number; lastError: string | null; lastSyncedAt: string | null; lockedAt: string | null; continuing: boolean; overdue: boolean; count: number };
+  status: string; revision: number; lastError: string | null; lastSyncedAt: string | null; lockedAt: string | null; continuing: boolean; overdue: boolean; count: number; channelPaused: boolean };
 const platforms = { youtube: "YouTube", instagram: "Instagram", facebook: "Facebook" };
 const errors: Record<string, string> = { invalid_video_url: "Seçili platforma ait bir video veya paylaşım bağlantısı gir.",
   source_identity_mismatch: "Paylaşım bağlantısı ve girilen API kimliği farklı içeriklere ait. Kimliği kontrol et.",
   meta_resource_id_required: "Bu paylaşımın sayısal Meta medya / paylaşım kimliği gerekli. Instagram bağlantısındaki kısa kod, API medya kimliği değildir.",
-  youtube_key_required: "YouTube Data API v3 anahtarını gir.", meta_connection_required: "Bu platform için aktif bir Meta bağlantısı seç.",
+  youtube_key_required: "Bağlantı ayarlarından YouTube kurulumunu tamamla.", meta_connection_required: "Bu platform için aktif bir Meta bağlantısı seç.",
   apify_key_required: "Apify API tokenını gir.", invalid_recovery: "Bu kayıt mevcut çalışma kimliğiyle kurtarılamıyor.",
   video_exists: "Bu paylaşım zaten listede.", conflict: "Kayıt değişti. Listeyi yenileyip tekrar dene.", source_busy: "Tarama sürüyor veya kaynak duraklatılmış.",
 };
@@ -62,7 +62,7 @@ export function WatchedVideos({ videos, connections, hasYouTubeKey, hasApifyKey,
         body: JSON.stringify({ platform, url, resourceId: resourceId || undefined,
           provider: apify ? "apify" : "official", resultsLimit: limit, pollMinutes: minutes, maxChargeCents: Math.round(charge * 100),
           sourceText: sourceText || undefined, channelName: channel || undefined,
-          connectionId: platform === "youtube" || apify ? undefined : connectionId || undefined, apiKey: platform === "youtube" || apify ? key : undefined }) });
+          connectionId: platform === "youtube" || apify ? undefined : connectionId || undefined, apiKey: apify ? key : undefined }) });
       const body = await response.json();
       if (!response.ok) throw new Error(errors[body.error] ?? "Video eklenemedi. Alanları kontrol et.");
       setUrl(""); setResourceId(""); setKey(""); setSourceText(""); setChannel(""); setMessage("Video eklendi ve yorum taraması sıraya alındı."); router.refresh();
@@ -105,7 +105,7 @@ export function WatchedVideos({ videos, connections, hasYouTubeKey, hasApifyKey,
         <label>Video / paylaşım bağlantısı<input className="input" type="url" required maxLength={2048} value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://…" /></label>
         {platform !== "youtube" ? <label>Yorum erişimi<select className="input" value={provider} onChange={(event) => { setProvider(event.target.value as "official" | "apify"); setKey(""); setConnectionId(""); setResourceId(""); }}>
           <option value="apify">Apify · başka hesapların herkese açık yorumları</option><option value="official">Meta · yetkilendirilmiş yayın</option></select></label> : null}
-        {platform === "youtube" || apify ? <label>{apify ? "Apify API tokenı" : "YouTube Data API anahtarı"}{(apify ? hasApifyKey : hasYouTubeKey) ? " · kayıtlı" : ""}<input className="input" type="password" autoComplete="new-password" required={!(apify ? hasApifyKey : hasYouTubeKey)} maxLength={4096} value={key} onChange={(event) => setKey(event.target.value)} placeholder={(apify ? hasApifyKey : hasYouTubeKey) ? "Boş bırakırsan kayıtlı anahtar kullanılır" : apify ? "Apify Console → Settings → API token" : "Google Cloud API anahtarı"} /></label> : <>
+        {platform === "youtube" ? (!hasYouTubeKey ? <p className="notice">YouTube kurulumu gerekli. <Link className="text-link" href="/settings/integrations#youtube">Bağlantı ayarlarını aç</Link></p> : null) : apify ? <label>Apify API tokenı{hasApifyKey ? " · kayıtlı" : ""}<input className="input" type="password" autoComplete="new-password" required={!hasApifyKey} maxLength={4096} value={key} onChange={(event) => setKey(event.target.value)} placeholder={hasApifyKey ? "Boş bırakırsan kayıtlı anahtar kullanılır" : "Apify Console → Settings → API token"} /></label> : <>
           <label>Meta erişim bağlantısı<select className="input" required value={connectionId} onChange={(event) => setConnectionId(event.target.value)}><option value="">Bağlantı seç</option>
             {connections.filter((connection) => connection.platform === platform).map((connection) => <option key={connection.id} value={connection.id}>{connection.name}</option>)}</select></label>
           <label>Meta paylaşım / medya kimliği<input className="input" required={platform === "instagram"} maxLength={100} value={resourceId} onChange={(event) => setResourceId(event.target.value)} placeholder={platform === "instagram" ? "Sayısal Instagram medya kimliği" : "Bağlantıdan çıkarılamıyorsa paylaşım kimliği"} /></label>
@@ -122,7 +122,7 @@ export function WatchedVideos({ videos, connections, hasYouTubeKey, hasApifyKey,
           <p className="small muted">Apify ücretlidir. Ekleme sonrası ilk tarama başlar; ardından seçtiğin aralıkla tekrarlanır. Yanıtlar da istenir ve yorum sınırını aşabilir; bütçe sınırı Apify’ye iletilir. Yalnız sağlayıcının erişebildiği herkese açık yorumlar alınır.</p>
           <a className="small" href="https://console.apify.com/settings/integrations" target="_blank" rel="noopener noreferrer">Apify API tokenını al ↗</a>
         </> : null}
-        <button className="btn primary" type="submit">{busy === "add" ? "Ekleniyor…" : "İzlemeye ekle"}</button>
+        <button className="btn primary" type="submit" disabled={platform === "youtube" && !hasYouTubeKey}>{busy === "add" ? "Ekleniyor…" : "İzlemeye ekle"}</button>
       </fieldset></form></section>
     {error ? <div className="notice" role="alert" style={{ marginTop: 16 }}>{error}</div> : null}
     {message ? <p className="small" role="status">{message}</p> : null}
@@ -138,6 +138,7 @@ export function WatchedVideos({ videos, connections, hasYouTubeKey, hasApifyKey,
         <div className="watched-video-stats"><strong>{video.count} yorum</strong><span className="small muted">{video.lastSyncedAt ? `Son tarama: ${new Date(video.lastSyncedAt).toLocaleString("tr-TR", { timeZone: "Europe/Istanbul" })}` : "Tarama henüz tamamlanmadı"}</span></div>
         {video.lastError ? <p className="notice small">{sourceError(video.lastError)}</p> : null}
         <p className="small muted">{scan.note}</p>
+        {video.channelPaused ? <p className="small muted">Kanal takibi kapalı. <Link href="/settings/meta#youtube-channels" className="text-link">Hesaplarım sayfasından</Link> devam ettirebilirsin.</p> : null}
         {video.provider === "apify" ? <details><summary>Sonraki taramanın kapsam ve bütçesi</summary>
           <form key={video.revision} onSubmit={(event) => { void configure(video, event); }}><fieldset disabled={busy !== null || Boolean(running) || video.continuing} className="llm-fields">
             <label>Üst yorum sınırı<input className="input" name="resultsLimit" type="number" min={1} max={10000} required defaultValue={video.resultsLimit} /></label>
@@ -153,7 +154,7 @@ export function WatchedVideos({ videos, connections, hasYouTubeKey, hasApifyKey,
           <button className="btn" disabled={busy !== null || !/^[A-Za-z0-9]{10,40}$/.test(runIds[video.id] ?? "")} onClick={() => action(video, "recover")}>Bu çalışmadan devam et</button>
           <button className="btn" disabled={busy !== null} onClick={() => action(video, "restart")}>Yeni tarama başlat</button></div> : null}
         <div className="watched-video-actions"><Link className="btn primary" href={`/?video=${video.id}`}>Yorumları gör</Link>
-          {!(video.provider === "apify" && video.status === "blocked" && video.continuing) ? <button className="btn" disabled={busy !== null || Boolean(running)} onClick={() => action(video, video.status === "active" ? "collect" : "resume")}>{video.status === "paused" ? "Devam et" : video.status === "blocked" ? "Tekrar dene" : "Yorumları al"}</button> : null}
+          {!(video.provider === "apify" && video.status === "blocked" && video.continuing) ? <button className="btn" disabled={busy !== null || Boolean(running) || video.channelPaused} onClick={() => action(video, video.status === "active" ? "collect" : "resume")}>{video.status === "paused" ? "Devam et" : video.status === "blocked" ? "Tekrar dene" : "Yorumları al"}</button> : null}
           {video.status === "active" ? <button className="btn" disabled={busy !== null} onClick={() => action(video, "pause")}>Duraklat</button> : null}
           <button className="btn" disabled={busy !== null} onClick={() => action(video, "remove")}>İzlemeyi kaldır</button></div>
       </article>;

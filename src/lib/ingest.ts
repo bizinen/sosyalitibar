@@ -23,6 +23,7 @@ export type SocialItemInput = {
   permalink?: string | null;
   sourceCreatedAt?: Date | null;
   sourceReadVersion?: number;
+  analysisExcluded?: boolean;
   raw?: unknown;
 };
 
@@ -73,7 +74,8 @@ export async function upsertSocialItem(input: SocialItemInput, assertOwnership?:
         sourceReadVersion,
         sourceCheckedAt: now,
         raw: input.raw as never,
-        analysisStatus: "pending",
+        analysisExcluded: input.analysisExcluded ?? false,
+        analysisStatus: input.analysisExcluded ? "complete" : "pending",
         analysisAvailableAt: now,
       }).returning();
       if (!created) throw new Error("social item oluşturulamadı");
@@ -115,7 +117,7 @@ export async function upsertSocialItem(input: SocialItemInput, assertOwnership?:
       raw: raw as never,
       ...(changed ? {
         reviewStatus: "new",
-        analysisStatus: "pending",
+        analysisStatus: existing.analysisExcluded ? "complete" : "pending",
         analysisRevision: existing.analysisRevision + 1,
         analysisAttempts: 0,
         analysisAvailableAt: now,
@@ -363,6 +365,7 @@ export async function claimAnalysisJobs(limit = 20): Promise<Array<{ id: string;
   const now = new Date();
   const candidates = await db.select({ id: socialItems.id }).from(socialItems).where(and(
     inArray(socialItems.analysisStatus, ["pending", "retry"]),
+    eq(socialItems.analysisExcluded, false),
     lte(socialItems.analysisAvailableAt, now),
   )).orderBy(asc(socialItems.analysisAvailableAt), asc(socialItems.ingestedAt)).limit(Math.max(1, Math.min(limit * 2, 100)));
 
@@ -377,6 +380,7 @@ export async function claimAnalysisJobs(limit = 20): Promise<Array<{ id: string;
       updatedAt: now,
     }).where(and(
       eq(socialItems.id, candidate.id),
+      eq(socialItems.analysisExcluded, false),
       inArray(socialItems.analysisStatus, ["pending", "retry"]),
       lte(socialItems.analysisAvailableAt, now),
     )).returning({ id: socialItems.id });
