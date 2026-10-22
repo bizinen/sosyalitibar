@@ -43,6 +43,7 @@ it("shows actual channel identity and scan coverage without equating discovered 
   expect(html).toContain('value="120" max="394"');
   expect(html).toContain("ilk tarama tamamlandı");
   expect(html).toContain("3 videonun yorumları alınamadı");
+  expect(html).toContain("videonun yorumlarını yeniden al");
   expect(html).toContain("Henüz tamamlanmadı");
 });
 

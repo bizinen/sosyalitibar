@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { auditLogs, watchedVideos } from "@/db/schema";
 import { isAdmin } from "@/lib/auth";
@@ -18,7 +18,7 @@ export async function PATCH(req: Request, context: { params: Promise<{ id: strin
   let body: unknown;
   try { body = JSON.parse(new TextDecoder().decode(await readResponseBody(new Response(req.body), 2048))); }
   catch { return NextResponse.json({ error: "invalid_body" }, { status: 400 }); }
-  const parsed = z.object({ action: z.enum(["pause", "resume", "collect", "remove", "recover", "restart", "configure"]), revision: z.number().int().positive(),
+  const parsed = z.object({ action: z.enum(["pause", "resume", "collect", "remove", "recover", "restart", "configure", "retry_failed"]), revision: z.number().int().positive(),
     runId: z.string().regex(/^[A-Za-z0-9]{10,40}$/).optional(), settings: videoScanSettingsSchema.optional() }).strict().safeParse(body);
   if (!parsed.success) return NextResponse.json({ error: "invalid_body" }, { status: 400 });
   try {
@@ -27,6 +27,17 @@ export async function PATCH(req: Request, context: { params: Promise<{ id: strin
       if (!current || current.status === "removed") return "not_found";
       if (current.revision !== parsed.data.revision) return "conflict";
       const action = parsed.data.action;
+      if (action === "retry_failed") {
+        if (current.platform !== "youtube" || current.sourceKind !== "channel") return "invalid_channel";
+        if (current.status !== "active") return "channel_paused";
+        const queued = await tx.update(watchedVideos).set({ status: "active", revision: sql`${watchedVideos.revision} + 1`,
+          availableAt: new Date(), attempts: 0, lastError: null, lockId: null, lockedAt: null, progressEncrypted: null, updatedAt: new Date(),
+        }).where(and(eq(watchedVideos.channelId, id), eq(watchedVideos.platform, "youtube"), eq(watchedVideos.sourceKind, "video"),
+          eq(watchedVideos.provider, "official"), eq(watchedVideos.status, "blocked"), isNull(watchedVideos.purgedAt))).returning({ id: watchedVideos.id });
+        if (queued.length) await tx.insert(auditLogs).values({ actor: "admin", action: "youtube_channel.retry_failed_videos", entityType: "watched_video", entityId: id,
+          metadata: { count: queued.length } });
+        return { saved: true, queued: queued.length, abort: undefined, abortUnconfirmed: false };
+      }
       if (action === "configure") {
         if (current.provider !== "apify" || !parsed.data.settings) return "invalid_settings";
         if (current.lockId || current.progressEncrypted) return "source_busy";
@@ -68,6 +79,6 @@ export async function PATCH(req: Request, context: { params: Promise<{ id: strin
       try { await abortApifyRun(result.abort.runId, result.abort.key); }
       catch { warning = "apify_abort_unconfirmed"; }
     }
-    return NextResponse.json({ saved: true, warning });
+    return NextResponse.json({ saved: true, warning, queued: "queued" in result ? result.queued : undefined });
   } catch { return NextResponse.json({ error: "video_save_failed" }, { status: 500 }); }
 }

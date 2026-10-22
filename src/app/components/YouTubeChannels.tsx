@@ -4,6 +4,7 @@ import { useRef, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { youtubeChannelReference, youtubeProfileImage } from "@/lib/video-source";
+import { UiIcon } from "@/app/components/UiIcon";
 
 export type Channel = { id: string; title: string | null; url: string; status: string; revision: number; count: number;
   profileImageUrl?: string | null; scannedCount?: number; blockedCount?: number; lastCommentScan?: number | null;
@@ -46,16 +47,19 @@ export function YouTubeChannels({ channels, hasKey, mode = "add", onAdded, onBus
     } catch (error) { setMessage(error instanceof Error ? error.message : "Kanal eklenemedi."); }
     finally { setBusy(false); onBusyChange?.(false); }
   }
-  async function action(channel: Channel, action: "pause" | "resume" | "remove") {
+  async function action(channel: Channel, action: "pause" | "resume" | "remove" | "retry_failed") {
     setBusy(true); setMessage("");
     try {
-      const response = await fetch(`/api/videos/${channel.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ action, revision: channel.revision }) });
+      const response = await fetch(`/api/videos/${channel.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, signal: AbortSignal.timeout(30000), body: JSON.stringify({ action, revision: channel.revision }) });
+      const body = await response.json();
       if (!response.ok) {
         if (response.status === 409 || response.status === 404) router.refresh();
-        throw new Error(response.status === 409 ? "Kanal başka bir işlemde değişti. Güncel listeyi kontrol edip tekrar dene." : "Kanal güncellenemedi. Listeyi yenileyip tekrar dene.");
+        throw new Error(body.error === "channel_paused" ? "Önce kanal takibini devam ettir, ardından alınamayan yorumları yeniden dene."
+          : response.status === 409 ? "Kanal başka bir işlemde değişti. Güncel listeyi kontrol edip tekrar dene." : "Kanal güncellenemedi. Listeyi yenileyip tekrar dene.");
       }
       setConfirmRemove(null);
-      setMessage(`${channel.title || "Kanal"}: ${action === "remove" ? "takip kaldırıldı; geçmiş yorumlar korundu." : action === "pause" ? "video keşfi ve yorum alımı duraklatıldı." : "kanal takibi devam edecek."}`);
+      setMessage(`${channel.title || "Kanal"}: ${action === "retry_failed" ? body.queued > 0 ? `${body.queued} video için yorum alımı yeniden sıraya alındı.` : "yeniden denenecek başarısız video kalmadı; liste güncellendi."
+        : action === "remove" ? "takip kaldırıldı; geçmiş yorumlar korundu." : action === "pause" ? "video keşfi ve yorum alımı duraklatıldı." : "kanal takibi devam edecek."}`);
       router.refresh();
     } catch (error) { setMessage(error instanceof Error ? error.message : "İşlem başarısız."); }
     finally { setBusy(false); }
@@ -80,7 +84,9 @@ export function YouTubeChannels({ channels, hasKey, mode = "add", onAdded, onBus
       <p className="small muted">{channel.status === "paused" ? "Video keşfi ve yorum alımı duraklatıldı. Geçmiş yorumlar korunuyor." : channel.status === "blocked" ? "Kanal takibi durmuş. Hata bilgisini ve bağlantı ayarlarını kontrol edip yeniden dene." : channel.continuing ? "Kanalın video arşivi sırayla alınıyor. Yeni yorumların takibi de devam eder." : "Kanalın yeni videoları ve yorumları otomatik takip edilir."}</p>
       <dl><div><dt>Son yorum taraması</dt><dd>{channel.lastCommentScan ? new Date(channel.lastCommentScan).toLocaleString("tr-TR", { timeZone: "Europe/Istanbul" }) : "Henüz tamamlanmadı"}</dd></div><div><dt>Son video keşfi</dt><dd>{channel.lastSyncedAt ? new Date(channel.lastSyncedAt).toLocaleString("tr-TR", { timeZone: "Europe/Istanbul" }) : "Henüz tamamlanmadı"}</dd></div><div><dt>Analiz başlangıcı</dt><dd>{channel.analysisAfter ? new Date(channel.analysisAfter).toLocaleString("tr-TR", { timeZone: "Europe/Istanbul" }) : "Belirlenmedi"}</dd></div><div><dt>Geçmiş yorumlar</dt><dd>Yalnız arşivlenir; otomatik AI analizi yapılmaz. İlk taramanın tamamlanması, erişilebilir yorum sayfalarının alındığını belirtir; yeni yorumların kontrolü devam eder.</dd></div></dl>
       {channel.lastError ? <p className="notice">{errors[channel.lastError] ?? "Video keşfi tamamlanamadı. Kaynak/kota kontrolünden sonra tekrar deneyebilirsin."}</p> : null}
-      </details><Link className="btn primary" aria-label={`${channel.title || "Kanal"}: videolar ve yorumlar`} href={`/?mode=sources&connection=youtube:${channel.id}`}>Yorumlar</Link><details className="account-more"><summary>İşlemler</summary><button className="btn" disabled={busy} onClick={() => action(channel, channel.status === "active" ? "pause" : "resume")}>{channel.status === "active" ? "Duraklat" : channel.status === "blocked" ? "Yeniden dene" : "Takibe devam et"}</button><button className="btn danger" disabled={busy} onClick={event => { removeButton.current = event.currentTarget; setConfirmRemove(channel.id); }}>Kanal takibini kaldır…</button></details></div>
+      </details><Link className="btn primary" aria-label={`${channel.title || "Kanal"}: videolar ve yorumlar`} href={`/?mode=sources&connection=youtube:${channel.id}`}>Yorumlar</Link><details className="account-more"><summary>İşlemler</summary>
+        {channel.blockedCount ? <button className="btn" disabled={busy || channel.status !== "active"} title={channel.status !== "active" ? "Önce kanal takibini devam ettir." : "Yalnız yorumları alınamayan videolar yeniden sıraya alınır."} onClick={() => action(channel, "retry_failed")}><UiIcon name="refresh" size={13} /> {channel.blockedCount} videonun yorumlarını yeniden al</button> : null}
+        <button className="btn" disabled={busy} onClick={() => action(channel, channel.status === "active" ? "pause" : "resume")}>{channel.status === "active" ? "Duraklat" : channel.status === "blocked" ? "Yeniden dene" : "Takibe devam et"}</button><button className="btn danger" disabled={busy} onClick={event => { removeButton.current = event.currentTarget; setConfirmRemove(channel.id); }}>Kanal takibini kaldır…</button></details></div>
       {confirmRemove === channel.id ? <div className="account-remove-confirm" role="group" aria-label={`${channel.title || "Kanal"} takibini kaldır`}><strong>{channel.title || "Kanal"} takipten çıkarılsın mı?</strong><p>Bu kanalın video keşfi ve yorum alımı durur. Alınan videolar, yorumlar ve incelemeler korunur. Kanalı tekrar eklersen ilk analiz başlangıç tarihi korunur.</p><div className="btn-row"><button className="btn" disabled={busy} onClick={() => { setConfirmRemove(null); removeButton.current?.focus(); }}>Vazgeç</button><button className="btn danger" disabled={busy} onClick={() => action(channel, "remove")}>Evet, takibi kaldır</button></div></div> : null}
     </article>)}</div> : null}
   </section>;
