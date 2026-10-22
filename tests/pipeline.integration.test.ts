@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { and, desc, eq, lt, or, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { alertOutbox, alertSettings, connectionTargets, itemReviewEvents, metaAuthAccounts, oauthNonces, monitoringTargets, socialAnalyses, socialConnections, socialItems, watchedVideos, webhookEvents } from "@/db/schema";
+import { alertOutbox, alertSettings, connectionTargets, itemReviewEvents, itemTranslations, metaAuthAccounts, oauthNonces, monitoringTargets, socialAnalyses, socialConnections, socialItems, watchedVideos, webhookEvents } from "@/db/schema";
 import { encodeItemCursor, decodeItemCursor } from "@/lib/cursor";
 import { env } from "@/lib/config";
 import { decryptSecret, encryptSecret } from "@/lib/crypto";
@@ -34,6 +34,7 @@ import { POST as addVideo } from "@/app/api/videos/route";
 import { invalidateAnalyses } from "@/lib/analysis-state";
 import { collectWatchedVideos } from "@/lib/watched-videos";
 import { PATCH as configureVideo } from "@/app/api/videos/[id]/route";
+import { DELETE as purgeSource } from "@/app/api/sources/[key]/route";
 import { POST as pollUpdates, GET as pollLegacyUpdates } from "@/app/api/items/updates/route";
 import * as auditModule from "@/lib/audit";
 import { POST as retryDeadAnalysis } from "@/app/api/admin/dead-letter/analysis/[id]/route";
@@ -72,7 +73,7 @@ async function connection(status = "active") {
   return row!;
 }
 async function item(connectionId?: string) {
-  return (await upsertSocialItem({ connectionId, platform: "facebook", externalId: "comment-1", text: "ilk yorum" })).item;
+  return (await upsertSocialItem({ connectionId, platform: "facebook", externalId: "comment-1", text: "ilk yorum" })).item!;
 }
 async function analyzed(connectionId?: string) {
   const source = await item(connectionId);
@@ -187,7 +188,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
     const newer = await beginSourceRead();
     const current = await upsertSocialItem({ platform: "facebook", externalId: "ordered-comment", text: "new text", sourceReadVersion: newer });
     const stale = await upsertSocialItem({ platform: "facebook", externalId: "ordered-comment", text: "old text", sourceReadVersion: older });
-    expect(stale).toMatchObject({ changed: false, item: { text: "new text", analysisRevision: current.item.analysisRevision, sourceReadVersion: newer } });
+    expect(stale).toMatchObject({ changed: false, item: { text: "new text", analysisRevision: current.item!.analysisRevision, sourceReadVersion: newer } });
     expect(await upsertSocialItem({ platform: "facebook", externalId: "ordered-comment", text: "replayed snapshot", sourceReadVersion: newer }))
       .toMatchObject({ changed: false, item: { text: "new text" } });
   });
@@ -254,7 +255,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
     const source = await upsertSocialItem({ platform: "facebook", externalId: "empty-comment", text: " " });
     const [job] = await claimAnalysisJobs(1);
     expect(await analyzeClaimedItem(job!.id, job!.lockId)).toEqual({ processed: true });
-    expect(await db.query.socialAnalyses.findFirst({ where: eq(socialAnalyses.itemId, source.item.id) }))
+    expect(await db.query.socialAnalyses.findFirst({ where: eq(socialAnalyses.itemId, source.item!.id) }))
       .toMatchObject({ triageLabel: "insan_incelemesi_gerekli", category: null, severity: null, needsReview: true, model: "deterministic" });
     expect(mocks.analyze).not.toHaveBeenCalled();
   });
@@ -367,6 +368,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
       raw: { external_source: true, watched_video_id: video!.id, source_channel: "Channel",
         source_post: { id: "video-1", text: "Post context" }, context_incomplete: false, provider_detail: "discard" } };
     const { item: source } = await upsertSocialItem(input);
+    expect.assert(source);
     const [job] = await claimAnalysisJobs(1);
     await analyzeClaimedItem(job!.id, job!.lockId, async () => ({ ...result(), data: { label: "acil_inceleme" } }));
     await recordItemReview(source.id, { reviewStatus: "reviewed", expectedReviewStatus: "new", analysisRevision: source.analysisRevision });
@@ -491,7 +493,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
   it.each(["facebook", "instagram"] as const)("handles explicit %s delete without reviving a tombstone", async (platform) => {
     const source = await connection();
     await db.update(socialConnections).set({ platform }).where(eq(socialConnections.id, source.id));
-    const saved = (await upsertSocialItem({ connectionId: source.id, platform, externalId: "comment-1", text: "delete fixture" })).item;
+    const saved = (await upsertSocialItem({ connectionId: source.id, platform, externalId: "comment-1", text: "delete fixture" })).item!;
     const [job] = await claimAnalysisJobs(1); await analyzeClaimedItem(job!.id, job!.lockId);
     const payload = { object: platform === "facebook" ? "page" : "instagram", entry: [{ id: source.externalAccountId,
       changes: [{ field: platform === "facebook" ? "feed" : "comments", value: { id: saved.externalId, comment_id: saved.externalId, item: "comment", verb: "remove" } }],
@@ -741,6 +743,86 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
     expect((await pollUpdates(make([], "https://evil.test"))).status).toBe(403);
     expect((await pollUpdates(request({ after, ids: [], extra: "x".repeat(65536) }))).status).toBe(400);
     expect((await pollLegacyUpdates(new Request(`http://localhost:3000/api/items/updates?after=${after}&ids=${rows[0]!.id}`))).status).toBe(200);
+  });
+
+  it("purges a source with analyses, translations, reviews and alerts while preserving other sources", async () => {
+    const root = "dQw4w9WgXcQ";
+    const [watch] = await db.insert(watchedVideos).values({ platform: "youtube", externalId: root, url: `https://www.youtube.com/watch?v=${root}`,
+      title: "Private title", sourceText: "Private context", apiKeyEncrypted: encryptSecret("private-key") }).returning();
+    const rows = await db.insert(socialItems).values([
+      { platform: "youtube", externalId: "purge-parent", rootExternalId: root, text: "private comment" },
+      { platform: "youtube", externalId: "purge-reply", rootExternalId: root, parentExternalId: "purge-parent", itemType: "reply", text: "private reply" },
+      { platform: "youtube", externalId: "keep-other", rootExternalId: "other-root", text: "keep" },
+      { platform: "facebook", externalId: "keep-platform", rootExternalId: root, text: "keep" },
+    ]).returning();
+    await db.insert(socialAnalyses).values({ itemId: rows[0]!.id, model: "fixture", promptVersion: "fixture", inputHash: "a", needsReview: true });
+    await db.insert(itemTranslations).values({ itemId: rows[0]!.id, analysisRevision: 1, text: "private translation", model: "fixture" });
+    await recordItemReview(rows[0]!.id, { reviewStatus: "reviewed", expectedReviewStatus: "new", analysisRevision: 1 });
+    await db.insert(alertOutbox).values(["pending", "processing", "retry", "dead", "delivered"].map(status => ({ itemId: rows[0]!.id,
+      dedupeKey: `purge-${status}`, ruleKey: "fixture", status, payload: { text: "private alert" } })));
+    const key = { params: Promise.resolve({ key: sourceKey("youtube", root) }) };
+    expect((await purgeSource(request({ confirm: "delete_source", revision: 2 }), key)).status).toBe(409);
+    expect(await db.select().from(socialItems)).toHaveLength(4);
+    const removed = await purgeSource(request({ confirm: "delete_source", revision: 1 }), key);
+    expect(removed.status).toBe(200); expect(await removed.json()).toMatchObject({ deleted: true, commentsDeleted: 2 });
+    expect((await db.select().from(socialItems)).map(row => row.externalId).sort()).toEqual(["keep-other", "keep-platform"]);
+    for (const table of [socialAnalyses, itemTranslations, itemReviewEvents, alertOutbox]) expect(await db.select().from(table)).toHaveLength(0);
+    expect(await db.query.watchedVideos.findFirst({ where: eq(watchedVideos.id, watch!.id) })).toMatchObject({ status: "removed", revision: 2,
+      url: "", title: null, sourceText: null, apiKeyEncrypted: null, progressEncrypted: null });
+    expect((await commentSources({ platform: "youtube" })).rows.some(row => row.source_id === root)).toBe(false);
+    expect(await db.select().from(auditLogs).where(eq(auditLogs.entityId, rows[0]!.id))).toHaveLength(0);
+    expect((await db.query.auditLogs.findFirst({ where: eq(auditLogs.action, "source.purged") }))?.metadata).toEqual({ commentsDeleted: 2 });
+    expect(await upsertSocialItem({ platform: "youtube", externalId: "late-comment", rootExternalId: root, text: "late" }))
+      .toMatchObject({ suppressed: true, item: null });
+    expect((await saveYouTubeSettings(request({ apiKey: "fixture-key", revision: 0 }))).status).toBe(200);
+    expect((await addVideo(request({ platform: "youtube", url: `https://www.youtube.com/watch?v=${root}` }))).status).toBe(201);
+    expect((await upsertSocialItem({ platform: "youtube", externalId: "fresh-comment", rootExternalId: root, text: "fresh" })).created).toBe(true);
+    expect((await db.query.watchedVideos.findFirst({ where: eq(watchedVideos.id, watch!.id) }))?.purgedAt).toBeNull();
+  });
+
+  it("purges retained history after unfollowing and rejects an in-flight analysis result", async () => {
+    const root = "dQw4w9WgXcQ";
+    const [watch] = await db.insert(watchedVideos).values({ platform: "facebook", externalId: root, url: "https://www.facebook.com/fixture" }).returning();
+    const source = await item();
+    await db.update(socialItems).set({ rootExternalId: root }).where(eq(socialItems.id, source.id));
+    const entered = deferred<void>(); const release = deferred<ReturnType<typeof result>>();
+    const [job] = await claimAnalysisJobs(1);
+    const analysis = analyzeClaimedItem(job!.id, job!.lockId, async () => { entered.resolve(); return release.promise; });
+    await entered.promise;
+    await configureVideo(request({ action: "remove", revision: 1 }), params(watch!.id));
+    expect((await commentSources({ platform: "facebook" })).rows[0]?.watch).toMatchObject({ id: watch!.id, status: "removed", revision: 2 });
+    const removed = await purgeSource(request({ confirm: "delete_source", revision: 2 }), { params: Promise.resolve({ key: sourceKey("facebook", root) }) });
+    expect(removed.status).toBe(200);
+    release.resolve(result());
+    expect(await analysis).toEqual({ processed: false, reason: "lost_lock" });
+    expect(await db.select().from(socialAnalyses)).toHaveLength(0);
+    expect(await db.select().from(alertOutbox)).toHaveLength(0);
+  });
+
+  it("purges native Meta source queues without removing other changes or resuming a disabled account", async () => {
+    const account = await connection("disabled");
+    await upsertSocialItem({ connectionId: account.id, platform: "facebook", externalId: "purge-comment", rootExternalId: "purge-post", text: "private" });
+    const keep = { field: "feed", value: { post_id: "keep-post", comment_id: "keep-comment", message: "keep" } };
+    const remove = { field: "feed", value: { post_id: "purge-post", comment_id: "purge-comment", message: "private" } };
+    await db.insert(webhookEvents).values({ dedupeKey: "mixed", objectType: "page", status: "processing", lockId: "old-worker",
+      payload: { object: "page", entry: [{ id: "page-1", changes: [remove, keep] }] } });
+    await db.insert(webhookEvents).values({ dedupeKey: "only-purge", objectType: "page",
+      payload: { object: "page", entry: [{ id: "page-1", changes: [remove] }] } });
+    const task = (id: string) => ({ kind: "comments", root: { id }, page: { data: [{ id: `${id}-comment`, message: id }] }, sourceReadVersion: 1 });
+    await db.update(socialConnections).set({ syncLockId: "stale", syncState: { continuation: encryptSecret(JSON.stringify({ tasks: [task("purge-post"), task("keep-post")], deadTasks: [] })) } }).where(eq(socialConnections.id, account.id));
+    const key = { params: Promise.resolve({ key: sourceKey("facebook", "purge-post") }) };
+    expect((await purgeSource(request({ revision: null }), key)).status).toBe(400);
+    expect((await purgeSource(new Request("http://localhost:3000/api/test", { method: "DELETE", headers: { origin: "https://evil.test" } }), key)).status).toBe(403);
+    expect((await purgeSource(request({ confirm: "delete_source", revision: null }), key)).status).toBe(200);
+    const mixed = await db.query.webhookEvents.findFirst({ where: eq(webhookEvents.dedupeKey, "mixed") });
+    expect(mixed).toMatchObject({ status: "pending", lockId: null, payload: { object: "page", entry: [{ id: "page-1", changes: [keep] }] } });
+    const single = await db.query.webhookEvents.findFirst({ where: eq(webhookEvents.dedupeKey, "only-purge") });
+    expect(single).toMatchObject({ status: "processed", payload: { object: "page", entry: [] } });
+    const saved = await db.query.socialConnections.findFirst({ where: eq(socialConnections.id, account.id) });
+    expect(saved).toMatchObject({ status: "disabled", syncLockId: null });
+    expect(JSON.parse(decryptSecret(String(saved!.syncState.continuation)))).toMatchObject({ tasks: [task("keep-post")], deadTasks: [] });
+    expect(await upsertSocialItem({ platform: "facebook", externalId: "purge-comment", rootExternalId: "purge-post", text: "late webhook" })).toMatchObject({ suppressed: true });
+    expect((await purgeSource(request({ confirm: "delete_source", revision: null }), { params: Promise.resolve({ key: sourceKey("facebook", null) }) })).status).toBe(400);
   });
 
   it("edits scan limits without deleting history, resuming a pause or replacing a running scan", async () => {
@@ -1023,7 +1105,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
     expect((await db.query.watchedVideos.findFirst())!.status).toBe("paused");
     expect(await collectWatchedVideos()).toHaveLength(0);
     await db.insert(watchedVideos).values({ platform: "youtube", externalId: "dQw4w9WgXcQ", url: "https://youtu.be/dQw4w9WgXcQ", channelId: channel!.id, analysisAfter: channel!.analysisAfter });
-    const saved = (await upsertSocialItem({ platform: "youtube", externalId: "saved", rootExternalId: "dQw4w9WgXcQ", text: "geçmiş", analysisExcluded: true })).item;
+    const saved = (await upsertSocialItem({ platform: "youtube", externalId: "saved", rootExternalId: "dQw4w9WgXcQ", text: "geçmiş", analysisExcluded: true })).item!;
     await configureVideo(request({ action: "remove", revision: 2 }), params(channel!.id));
     expect(await db.query.socialItems.findFirst({ where: eq(socialItems.id, saved.id) })).toBeDefined();
     expect(await collectWatchedVideos()).toHaveLength(0);
@@ -1077,7 +1159,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
   });
 
   it("enforces the historical no-analysis policy at the database boundary", async () => {
-    const source = (await upsertSocialItem({ platform: "youtube", externalId: "historical", text: "eski", analysisExcluded: true })).item;
+    const source = (await upsertSocialItem({ platform: "youtube", externalId: "historical", text: "eski", analysisExcluded: true })).item!;
     await expect(db.update(socialItems).set({ analysisStatus: "pending" }).where(eq(socialItems.id, source.id))).rejects.toThrow();
     expect(await claimAnalysisJobs(10)).toHaveLength(0);
   });

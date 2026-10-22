@@ -8,6 +8,7 @@ import { assertSameOrigin } from "@/lib/security";
 import { readResponseBody } from "@/lib/http-body";
 import { encryptSecret } from "@/lib/crypto";
 import { videoSource, videoScanSettingsSchema } from "@/lib/video-source";
+import { lockAnalysisContext } from "@/lib/analysis-state";
 
 const schema = z.object({ platform: z.enum(["youtube", "facebook", "instagram"]), url: z.string().trim().url().max(2048),
   resourceId: z.string().trim().max(100).optional(), connectionId: z.string().uuid().optional(),
@@ -35,6 +36,7 @@ export async function POST(req: Request) {
   catch (error) { return NextResponse.json({ error: error instanceof Error ? error.message : "invalid_video_url" }, { status: 400 }); }
   try {
     const result = await db.transaction(async (tx) => {
+      await lockAnalysisContext(tx, true);
       await tx.execute(sql`select pg_advisory_xact_lock(hashtext('sosyal_itibar_videos'))`);
       let encrypted: string | null = null;
       if (value.platform === "youtube") {
@@ -60,7 +62,7 @@ export async function POST(req: Request) {
         sourceText: value.sourceText || null, channelName: value.channelName || null,
         title: value.provider === "apify" ? value.sourceText?.split("\n")[0]?.slice(0, 500) || null : null, lastRunId: null, lastRunCount: null,
         credentialConnectionId: value.platform === "youtube" || value.provider === "apify" ? null : value.connectionId!, status: "active", attempts: 0,
-        lastError: null, lockId: null, lockedAt: null, progressEncrypted: null, availableAt: new Date(), updatedAt: new Date() };
+        purgedAt: null, lastSyncedAt: null, lastError: null, lockId: null, lockedAt: null, progressEncrypted: null, availableAt: new Date(), updatedAt: new Date() };
       const [video] = existing ? await tx.update(watchedVideos).set({ ...fields, revision: existing.revision + 1 }).where(eq(watchedVideos.id, existing.id)).returning({ id: watchedVideos.id })
         : await tx.insert(watchedVideos).values(fields).returning({ id: watchedVideos.id });
       await tx.insert(auditLogs).values({ actor: "admin", action: "video.added", entityType: "watched_video", entityId: video!.id, metadata: { platform: value.platform, externalId: source.externalId } });

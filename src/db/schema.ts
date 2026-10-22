@@ -131,6 +131,7 @@ export const watchedVideos = pgTable("watched_videos", {
   metadataCheckedAt: timestamp("metadata_checked_at", { withTimezone: true }),
   status: text("status").notNull().default("active"),
   revision: integer("revision").notNull().default(1),
+  purgedAt: timestamp("purged_at", { withTimezone: true }),
   attempts: integer("attempts").notNull().default(0),
   lastError: text("last_error"),
   lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
