@@ -7,7 +7,7 @@ const csp = [
   "form-action 'self' https://www.facebook.com",
   "frame-ancestors 'none'",
   "object-src 'none'",
-  "img-src 'self' data: blob:",
+  "img-src 'self' data: blob: https://*.googleusercontent.com https://*.ggpht.com https://*.fbcdn.net https://*.cdninstagram.com https://*.fbsbx.com",
   "font-src 'self' data:",
   "style-src 'self' 'unsafe-inline'",
   `script-src 'self' 'unsafe-inline'${isProd ? "" : " 'unsafe-eval'"}`,
