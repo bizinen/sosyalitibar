@@ -26,6 +26,8 @@ import { commentRows, sourceKey } from "@/lib/comment-feed";
 import { commentSources } from "@/lib/comment-sources";
 import { PUT as saveMetaSettings } from "@/app/api/settings/meta/route";
 import { GET as oauthCallback } from "@/app/api/meta/callback/route";
+import VideosPage from "@/app/settings/videos/page";
+import { collectWatchedVideos } from "@/lib/watched-videos";
 import { PATCH as configureVideo } from "@/app/api/videos/[id]/route";
 import { POST as pollUpdates, GET as pollLegacyUpdates } from "@/app/api/items/updates/route";
 import * as auditModule from "@/lib/audit";
@@ -731,6 +733,63 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
     await upsertSocialItem({ connectionId: connected.id, platform: "facebook", externalId: "meta-comment", rootExternalId: "meta-post", text: "sentetik" });
     const metaPage = await commentSources({ platform: "facebook" });
     expect(metaPage.rows[0]?.scan).toMatchObject({ provider: "meta", status: "paused" });
+  });
+
+  it.each([false, true])("blocks cursor cycles, including across worker checkpoints: %s", async (acrossRuns) => {
+    const [video] = await db.insert(watchedVideos).values({ platform: "youtube", externalId: "dQw4w9WgXcQ",
+      url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", apiKeyEncrypted: encryptSecret("fixture-key"),
+      progressEncrypted: encryptSecret(JSON.stringify({ phase: "comments", token: null, nextComments: null, parents: [], text: "Sentetik kaynak", channel: "Sentetik" })) }).returning();
+    let requests = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: string) => {
+      const url = new URL(input); const token = Number(url.searchParams.get("pageToken") ?? 0); requests++;
+      return Response.json({ items: [{ id: `thread-${token}`, snippet: { totalReplyCount: 0,
+        topLevelComment: { id: `comment-${token}`, snippet: { textDisplay: "sentetik", publishedAt: "2026-10-22T00:00:00Z" } } } }],
+        nextPageToken: String(token >= (acrossRuns ? 12 : 2) ? 1 : token + 1) });
+    }));
+    let [result] = await collectWatchedVideos();
+    if (acrossRuns) {
+      expect(result).toMatchObject({ completed: false });
+      const pending = await db.query.watchedVideos.findFirst({ where: eq(watchedVideos.id, video!.id) });
+      expect(JSON.parse(decryptSecret(pending!.progressEncrypted!)).seen).toHaveLength(12);
+      await db.update(watchedVideos).set({ availableAt: new Date() }).where(eq(watchedVideos.id, video!.id));
+      [result] = await collectWatchedVideos();
+    }
+    expect(result).toMatchObject({ error: "source_pagination_stalled" });
+    expect((await db.query.watchedVideos.findFirst({ where: eq(watchedVideos.id, video!.id) }))?.status).toBe("blocked");
+    expect(requests).toBe(acrossRuns ? 13 : 3);
+  });
+
+  it("accepts a repeated reply token under different parents without reporting a cursor cycle", async () => {
+    await db.insert(watchedVideos).values({ platform: "youtube", externalId: "dQw4w9WgXcQ",
+      url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", apiKeyEncrypted: encryptSecret("fixture-key"),
+      progressEncrypted: encryptSecret(JSON.stringify({ phase: "comments", token: null, nextComments: null, parents: [], text: "kaynak", channel: "sentetik" })) });
+    const comment = (id: string) => ({ id, snippet: { textDisplay: "sentetik", publishedAt: "2026-10-22T00:00:00Z" } });
+    vi.stubGlobal("fetch", vi.fn(async (input: string) => {
+      const url = new URL(input); const parent = url.searchParams.get("parentId");
+      if (!parent) return Response.json({ items: ["parent-1", "parent-2"].map(id => ({ id, snippet: { topLevelComment: comment(id), totalReplyCount: 2 } })) });
+      return Response.json({ items: [comment(`${parent}-${url.searchParams.get("pageToken") || "first"}`)],
+        ...(!url.searchParams.get("pageToken") ? { nextPageToken: "same-token" } : {}) });
+    }));
+    expect((await collectWatchedVideos())[0]).toMatchObject({ completed: true });
+    expect(await db.select().from(socialItems)).toHaveLength(6);
+  });
+
+  it("deduplicates parents repeated across comment pages without falsely blocking reply pagination", async () => {
+    await db.insert(watchedVideos).values({ platform: "youtube", externalId: "dQw4w9WgXcQ",
+      url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", apiKeyEncrypted: encryptSecret("fixture-key"),
+      progressEncrypted: encryptSecret(JSON.stringify({ phase: "comments", token: null, nextComments: null, parents: [], text: "kaynak", channel: "sentetik" })) });
+    const comment = (id: string) => ({ id, snippet: { textDisplay: "sentetik", publishedAt: "2026-10-22T00:00:00Z" } });
+    vi.stubGlobal("fetch", vi.fn(async (input: string) => {
+      const url = new URL(input);
+      if (url.searchParams.get("parentId")) return Response.json({ items: [comment("reply")] });
+      return Response.json({ items: [1, 2].map(() => ({ id: "thread", snippet: { topLevelComment: comment("parent"), totalReplyCount: 1 } })),
+        ...(!url.searchParams.get("pageToken") ? { nextPageToken: "next-threads" } : {}) });
+    }));
+    expect((await collectWatchedVideos())[0]).toMatchObject({ completed: true });
+    expect(await db.select().from(socialItems)).toHaveLength(2);
+    const page = await VideosPage();
+    const videos = page.props.children[1].props.children[1].props.videos as Array<{ count: number }>;
+    expect(videos[0]?.count).toBe(2);
   });
 
   it("accepts an OAuth nonce once, including parallel replay attempts", async () => {

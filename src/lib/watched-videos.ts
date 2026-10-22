@@ -15,6 +15,7 @@ import { ApifySourceError, collectApifyVideo } from "@/lib/apify-videos";
 
 const progressSchema = z.object({ phase: z.enum(["comments", "replies"]), token: z.string().max(16384).nullable(),
   nextComments: z.string().max(16384).nullable(), parents: z.array(z.string().min(1).max(256)).max(100),
+  seen: z.array(z.string().regex(/^[a-f0-9]{64}$/)).max(10000).default([]),
   text: z.string().max(20000), channel: z.string().max(256),
 }).strict();
 type Progress = z.infer<typeof progressSchema>;
@@ -120,7 +121,7 @@ async function collectVideo(video: Video, lockId: string) {
             !== new URL(video.url).pathname.replace(/\/$/, "")) throw new SourceError("source_identity_mismatch", true);
         text = root.caption ?? ""; channel = "Instagram yayını";
       }
-      progress = { phase: "comments", token: null, nextComments: null, parents: [], text: text.slice(0, 20000), channel: channel.slice(0, 256) };
+      progress = { phase: "comments", token: null, nextComments: null, parents: [], seen: [], text: text.slice(0, 20000), channel: channel.slice(0, 256) };
       await save(progress);
     }
     const deadline = Date.now() + 40000;
@@ -135,6 +136,10 @@ async function collectVideo(video: Video, lockId: string) {
       let lastHeartbeat = Date.now();
       const parent = progress.phase === "replies" ? progress.parents[0] : undefined;
       if (progress.phase === "replies" && !parent) throw new SourceError("invalid_source_progress", true);
+      const pageKey = crypto.createHash("sha256").update(JSON.stringify(parent
+        ? [progress.phase, parent, progress.nextComments, progress.token] : [progress.phase, null, progress.token])).digest("hex");
+      if (progress.seen.includes(pageKey)) throw new SourceError("source_pagination_stalled", true);
+      if (progress.seen.length >= 10000) throw new SourceError("source_pagination_limit", true);
       const sourcePost = { id: video.externalId, text: progress.text, permalink: video.url };
       const put = async (record: { id: string; text: string; author?: string; authorId?: string; avatar?: string; created?: string; parentId?: string; permalink?: string }) => {
         if (Date.now() - lastHeartbeat > 10000) { await save(progress); lastHeartbeat = Date.now(); }
@@ -180,8 +185,9 @@ async function collectVideo(video: Video, lockId: string) {
         next = page.paging?.next ?? null;
       }
       if (next && next === progress.token) throw new SourceError("source_pagination_stalled", true);
+      progress.seen.push(pageKey);
       if (!parent) {
-        progress = { ...progress, phase: parents.length ? "replies" : "comments", parents,
+        progress = { ...progress, phase: parents.length ? "replies" : "comments", parents: [...new Set(parents)],
           nextComments: next, token: parents.length ? null : next };
       } else if (next) progress.token = next;
       else {
