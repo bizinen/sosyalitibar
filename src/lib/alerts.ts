@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { and, asc, eq, inArray, isNull, lte, sql } from "drizzle-orm";
+import { and, eq, isNull, lte, sql } from "drizzle-orm";
 import { alertOutbox, socialItems } from "@/db/schema";
 import { db, type Transaction } from "@/lib/db";
 import { getAlertSettings } from "@/lib/alert-settings";
@@ -91,35 +91,21 @@ export async function enqueueAlertIfNeeded(item: AlertSourceItem, analysis: Anal
 }
 
 export async function claimAlertJobs(limit = 20): Promise<Array<{ id: string; lockId: string }>> {
-  const now = new Date();
-  const candidates = await db.select({ id: alertOutbox.id }).from(alertOutbox).where(and(
-    inArray(alertOutbox.status, ["pending", "retry"]),
-    lte(alertOutbox.availableAt, now),
-  )).orderBy(asc(alertOutbox.availableAt), asc(alertOutbox.createdAt)).limit(Math.max(1, Math.min(limit * 2, 200)));
-
-  const claimed: Array<{ id: string; lockId: string }> = [];
-  for (const candidate of candidates) {
-    if (claimed.length >= limit) break;
-    const lockId = crypto.randomUUID();
-    const [row] = await db.transaction(async (tx) => {
-      await tx.execute(sql`select pg_advisory_xact_lock_shared(hashtext('sosyal_itibar_alert_settings'))`);
-      const cfg = await getAlertSettings(tx);
-      if (!cfg.ALERT_WEBHOOK_URL || !cfg.ALERT_WEBHOOK_SECRET) return [];
-      return tx.update(alertOutbox).set({
-      status: "processing",
-      lockedAt: now,
-      dispatchStartedAt: null,
-      lockId,
-      updatedAt: now,
-    }).where(and(
-      eq(alertOutbox.id, candidate.id),
-      inArray(alertOutbox.status, ["pending", "retry"]),
-      lte(alertOutbox.availableAt, now),
-    )).returning({ id: alertOutbox.id });
-    });
-    if (row) claimed.push({ id: row.id, lockId });
-  }
-  return claimed;
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock_shared(hashtext('sosyal_itibar_alert_settings'))`);
+    const cfg = await getAlertSettings(tx);
+    if (!cfg.ALERT_WEBHOOK_URL || !cfg.ALERT_WEBHOOK_SECRET) return [];
+    const now = new Date().toISOString();
+    const rows = await tx.execute(sql`
+      with candidates as materialized (
+        select id from alert_outbox where status in ('pending', 'retry') and available_at <= ${now}::timestamptz
+        order by available_at, created_at, id for update skip locked limit ${Math.max(1, Math.min(limit, 100))}
+      ) update alert_outbox as alert set status = 'processing', locked_at = ${now}::timestamptz, dispatch_started_at = null,
+        lock_id = gen_random_uuid(), updated_at = ${now}::timestamptz
+      from candidates where alert.id = candidates.id returning alert.id, alert.lock_id as "lockId"
+    `);
+    return Array.from(rows as unknown as Iterable<{ id: string; lockId: string }>);
+  });
 }
 
 function retryableStatus(status: number): boolean {

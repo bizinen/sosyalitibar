@@ -55,6 +55,15 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+async function within<T>(work: Promise<T>, milliseconds = 3000): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([work, new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("Concurrent worker unexpectedly blocked")), milliseconds);
+    })]);
+  } finally { clearTimeout(timer); }
+}
+
 function request(body?: object) {
   return new Request("http://localhost:3000/api/test", {
     method: "POST", headers: { origin: "http://localhost:3000", "content-type": "application/json" },
@@ -1237,6 +1246,86 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
     const state = await createOAuthState();
     const accepted = await Promise.all([consumeOAuthState(state), consumeOAuthState(state)]);
     expect(accepted.filter(Boolean)).toHaveLength(1);
+  });
+
+  it.each(["analysis", "webhook", "alert"] as const)("claims disjoint %s batches and skips a locked job without starving other workers", async (kind) => {
+    let ids: string[];
+    let table: string;
+    let claim: (limit: number) => Promise<Array<{ id: string; lockId: string }>>;
+    if (kind === "analysis") {
+      ids = (await db.insert(socialItems).values(Array.from({ length: 24 }, (_, i) => ({
+        platform: "facebook", externalId: `parallel-${i}`, text: "yorum",
+      }))).returning({ id: socialItems.id })).map(row => row.id);
+      table = "social_items"; claim = claimAnalysisJobs;
+    } else if (kind === "webhook") {
+      ids = (await db.insert(webhookEvents).values(Array.from({ length: 24 }, (_, i) => ({
+        dedupeKey: `parallel-${i}`, payload: {},
+      }))).returning({ id: webhookEvents.id })).map(row => row.id);
+      table = "webhook_events"; claim = claimWebhookJobs;
+    } else {
+      const source = await item();
+      ids = (await db.insert(alertOutbox).values(Array.from({ length: 24 }, (_, i) => ({
+        itemId: source.id, dedupeKey: `parallel-${i}`, ruleKey: "test", payload: {},
+      }))).returning({ id: alertOutbox.id })).map(row => row.id);
+      table = "alert_outbox"; claim = claimAlertJobs;
+    }
+    const entered = deferred<void>(), release = deferred<void>();
+    const held = db.transaction(async tx => {
+      await tx.execute(sql`select id from ${sql.identifier(table)} where id = ${ids[0]}::uuid for update`);
+      entered.resolve(); await release.promise;
+    });
+    await entered.promise;
+    try {
+      const batches = await within(Promise.all([claim(8), claim(8), claim(8)]));
+      const jobs = batches.flat();
+      expect(jobs).toHaveLength(23);
+      expect(new Set(jobs.map(job => job.id)).size).toBe(23);
+      expect(new Set(jobs.map(job => job.lockId)).size).toBe(23);
+      expect(jobs.some(job => job.id === ids[0])).toBe(false);
+      expect(batches.every(batch => batch.length > 0)).toBe(true);
+    } finally { release.resolve(); await held; }
+    expect((await claim(8)).map(job => job.id)).toEqual([ids[0]]);
+  });
+
+  it("lets independent comments and siblings ingest while another item transaction is paused", async () => {
+    const entered = deferred<void>(), release = deferred<void>();
+    const slow = upsertSocialItem({ platform: "facebook", externalId: "slow", parentExternalId: "post", text: "bir" }, async () => {
+      entered.resolve(); await release.promise;
+    });
+    await entered.promise;
+    try {
+      const rows = await within(Promise.all([
+        upsertSocialItem({ platform: "facebook", externalId: "sibling", parentExternalId: "post", text: "iki" }),
+        upsertSocialItem({ platform: "facebook", externalId: "independent", parentExternalId: "other-post", text: "üç" }),
+      ]));
+      expect(rows.every(row => row.created)).toBe(true);
+    } finally { release.resolve(); await slow; }
+  });
+
+  it("fences a parent edit behind a new child insertion and invalidates the child's revision", async () => {
+    await upsertSocialItem({ platform: "facebook", externalId: "parent", text: "önce" });
+    const entered = deferred<void>(), release = deferred<void>();
+    const child = upsertSocialItem({ platform: "facebook", externalId: "child", parentExternalId: "parent", itemType: "reply", text: "cevap" }, async () => {
+      entered.resolve(); await release.promise;
+    });
+    await entered.promise;
+    let parentFinished = false;
+    const parent = upsertSocialItem({ platform: "facebook", externalId: "parent", text: "sonra" }).then(row => { parentFinished = true; return row; });
+    try {
+      await within((async () => {
+        const deadline = Date.now() + 2000;
+        while (Date.now() < deadline) {
+          const rows = await db.execute(sql`select 1 from pg_locks where locktype = 'advisory' and not granted
+            and classid = hashtext('facebook')::oid and objid = hashtext('parent')::oid`);
+          if (rows.length) return;
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        throw new Error("Parent edit did not wait for the child's shared lock");
+      })());
+      expect(parentFinished).toBe(false);
+    } finally { release.resolve(); await Promise.all([child, parent]); }
+    const saved = await db.query.socialItems.findFirst({ where: eq(socialItems.externalId, "child") });
+    expect(saved).toMatchObject({ analysisRevision: 2, analysisStatus: "pending" });
   });
 
   it("scrapes real PostgreSQL metrics with empty, future and runnable queues", async () => {

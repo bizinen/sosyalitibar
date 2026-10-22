@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { and, asc, eq, inArray, isNull, lte, sql } from "drizzle-orm";
+import { and, eq, isNull, lte, sql } from "drizzle-orm";
 import { db, type Transaction } from "@/lib/db";
 import { alertOutbox, connectionTargets, monitoringTargets, socialAnalyses, socialConnections, socialItems, watchedVideos } from "@/db/schema";
 import { analyzeComment, type AnalyzeCommentInput, type LlmResult } from "@/lib/llm";
@@ -50,7 +50,7 @@ export async function upsertSocialItem(input: SocialItemInput, assertOwnership?:
   const sourceReadVersion = input.sourceReadVersion ?? await beginSourceRead();
   if (!Number.isSafeInteger(sourceReadVersion) || sourceReadVersion < 1) throw new Error("source read version invalid");
   return db.transaction(async (tx) => {
-    await lockAnalysisContext(tx, true);
+    await lockAnalysisContext(tx);
     if (input.rootExternalId) {
       const [removed] = await tx.select({ id: watchedVideos.id }).from(watchedVideos).where(and(
         eq(watchedVideos.platform, input.platform), eq(watchedVideos.externalId, input.rootExternalId),
@@ -58,7 +58,15 @@ export async function upsertSocialItem(input: SocialItemInput, assertOwnership?:
       ));
       if (removed) return { item: null, created: false, changed: false, suppressed: true };
     }
-    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${input.platform}), hashtext(${input.externalId}))`);
+    // Siblings share the parent lock; a parent edit waits for child insertion before invalidating it.
+    await tx.execute(sql`
+      with keys as materialized (
+        select key, bool_or(exclusive) as exclusive from (values
+          (hashtext(${input.externalId}), true), (hashtext(${input.parentExternalId ?? input.externalId}), false)
+        ) as items(key, exclusive) group by key order by key
+      ) select case when exclusive then pg_advisory_xact_lock(hashtext(${input.platform}), key)
+        else pg_advisory_xact_lock_shared(hashtext(${input.platform}), key) end from keys
+    `);
     const [existing] = await tx.select().from(socialItems).where(and(
       eq(socialItems.platform, input.platform), eq(socialItems.externalId, input.externalId),
     )).for("update");
@@ -369,31 +377,17 @@ export async function processAnalysisJobs(jobs: Array<{ id: string; lockId: stri
 }
 
 export async function claimAnalysisJobs(limit = 20): Promise<Array<{ id: string; lockId: string }>> {
-  const now = new Date();
-  const candidates = await db.select({ id: socialItems.id }).from(socialItems).where(and(
-    inArray(socialItems.analysisStatus, ["pending", "retry"]),
-    eq(socialItems.analysisExcluded, false),
-    lte(socialItems.analysisAvailableAt, now),
-  )).orderBy(asc(socialItems.analysisAvailableAt), asc(socialItems.ingestedAt)).limit(Math.max(1, Math.min(limit * 2, 100)));
-
-  const claimed: Array<{ id: string; lockId: string }> = [];
-  for (const candidate of candidates) {
-    if (claimed.length >= limit) break;
-    const lockId = crypto.randomUUID();
-    const [row] = await db.update(socialItems).set({
-      analysisStatus: "processing",
-      analysisLockedAt: now,
-      analysisLockId: lockId,
-      updatedAt: now,
-    }).where(and(
-      eq(socialItems.id, candidate.id),
-      eq(socialItems.analysisExcluded, false),
-      inArray(socialItems.analysisStatus, ["pending", "retry"]),
-      lte(socialItems.analysisAvailableAt, now),
-    )).returning({ id: socialItems.id });
-    if (row) claimed.push({ id: row.id, lockId });
-  }
-  return claimed;
+  const now = new Date().toISOString();
+  const rows = await db.execute(sql`
+    with candidates as materialized (
+      select id from social_items where analysis_status in ('pending', 'retry') and not analysis_excluded
+        and analysis_available_at <= ${now}::timestamptz
+      order by analysis_available_at, ingested_at, id for update skip locked limit ${Math.max(1, Math.min(limit, 50))}
+    ) update social_items as item set analysis_status = 'processing', analysis_locked_at = ${now}::timestamptz,
+      analysis_lock_id = gen_random_uuid(), updated_at = ${now}::timestamptz
+    from candidates where item.id = candidates.id returning item.id, item.analysis_lock_id as "lockId"
+  `);
+  return Array.from(rows as unknown as Iterable<{ id: string; lockId: string }>);
 }
 
 export async function requeueStaleAnalysisLocks(maxAgeMinutes = 15): Promise<number> {

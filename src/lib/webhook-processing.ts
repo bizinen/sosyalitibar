@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
+import { and, eq, inArray, lte, sql } from "drizzle-orm";
 import { db, type Transaction } from "@/lib/db";
 import { alertOutbox, socialAnalyses, socialConnections, socialItems, webhookEvents } from "@/db/schema";
 import { decryptSecret } from "@/lib/crypto";
@@ -275,28 +275,15 @@ export async function processMetaWebhookPayload(payload: unknown, assertOwnershi
 }
 
 export async function claimWebhookJobs(limit = 25): Promise<Array<{ id: string; lockId: string }>> {
-  const now = new Date();
-  const candidates = await db.select({ id: webhookEvents.id }).from(webhookEvents).where(and(
-    inArray(webhookEvents.status, ["pending", "retry"]),
-    lte(webhookEvents.availableAt, now),
-  )).orderBy(asc(webhookEvents.availableAt), asc(webhookEvents.receivedAt)).limit(Math.max(1, Math.min(limit * 2, 200)));
-
-  const claimed: Array<{ id: string; lockId: string }> = [];
-  for (const candidate of candidates) {
-    if (claimed.length >= limit) break;
-    const lockId = crypto.randomUUID();
-    const [row] = await db.update(webhookEvents).set({
-      status: "processing",
-      lockedAt: now,
-      lockId,
-    }).where(and(
-      eq(webhookEvents.id, candidate.id),
-      inArray(webhookEvents.status, ["pending", "retry"]),
-      lte(webhookEvents.availableAt, now),
-    )).returning({ id: webhookEvents.id });
-    if (row) claimed.push({ id: row.id, lockId });
-  }
-  return claimed;
+  const now = new Date().toISOString();
+  const rows = await db.execute(sql`
+    with candidates as materialized (
+      select id from webhook_events where status in ('pending', 'retry') and available_at <= ${now}::timestamptz
+      order by available_at, received_at, id for update skip locked limit ${Math.max(1, Math.min(limit, 100))}
+    ) update webhook_events as event set status = 'processing', locked_at = ${now}::timestamptz, lock_id = gen_random_uuid()
+    from candidates where event.id = candidates.id returning event.id, event.lock_id as "lockId"
+  `);
+  return Array.from(rows as unknown as Iterable<{ id: string; lockId: string }>);
 }
 
 export async function processClaimedWebhook(id: string, lockId: string) {
