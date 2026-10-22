@@ -46,14 +46,14 @@ export async function PUT(req: Request) {
       const previousId = current?.appId || env().META_APP_ID;
       if (previousId !== value.appId) {
         const [connection] = await tx.select({ id: socialConnections.id }).from(socialConnections).limit(1);
-        const [owner] = await tx.select({ id: metaAuthAccounts.id }).from(metaAuthAccounts).limit(1);
-        if (connection || owner) return "app_change_requires_disconnect";
+        if (connection) return "app_change_requires_disconnect";
         if (!value.appSecret) return "app_secret_required";
       }
       const secret = value.appSecret || (current ? decryptSecret(current.appSecretEncrypted) : env().META_APP_SECRET);
       const verifyToken = value.verifyToken || (current ? decryptSecret(current.verifyTokenEncrypted) : env().META_WEBHOOK_VERIFY_TOKEN);
       if (!secret || secret === "local-not-configured") return "app_secret_required";
       if (verifyToken.length < 16) return "verify_token_required";
+      if (previousId !== value.appId) await tx.delete(metaAuthAccounts);
       const fields = { appId: value.appId, loginConfigId: value.loginConfigId || null, appSecretEncrypted: encryptSecret(secret), verifyTokenEncrypted: encryptSecret(verifyToken), publicOrigin: origin.origin, graphVersion: value.graphVersion, revision: value.revision + 1, updatedAt: new Date() };
       if (current) await tx.update(metaSettings).set(fields).where(eq(metaSettings.id, "primary"));
       else await tx.insert(metaSettings).values({ id: "primary", ...fields });
