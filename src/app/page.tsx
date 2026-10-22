@@ -11,7 +11,7 @@ import { encodeItemCursor } from "@/lib/cursor";
 import { commentDisplay } from "@/lib/comment-display";
 import { SourceBrowser } from "@/app/components/SourceBrowser";
 
-import { commentConditions, commentRows, sourceKey, type CommentParams as Params } from "@/lib/comment-feed";
+import { commentConditions, commentRows, commentSortOptions, sourceKey, type CommentParams as Params } from "@/lib/comment-feed";
 
 export default async function Home({ searchParams }: { searchParams: Promise<Params> }) {
   if (!(await isAdmin())) redirect("/login");
@@ -20,7 +20,8 @@ export default async function Home({ searchParams }: { searchParams: Promise<Par
     const [video] = await db.select({ platform: watchedVideos.platform, externalId: watchedVideos.externalId }).from(watchedVideos).where(eq(watchedVideos.id, p.video)).limit(1);
     if (video) p.source = sourceKey(video.platform, video.externalId);
   }
-  const showSources = p.mode === "sources" || !(p.mode === "comments" || p.source || p.video || p.view || p.q || p.cursor || p.review || p.needsReview || p.sentiment || p.category || p.minSeverity || p.target || p.analysis || p.from || p.to);
+  const showSources = p.mode === "sources" || !(p.mode === "comments" || p.source || p.video || p.view || p.q || p.cursor || p.commentSort || p.review || p.needsReview || p.sentiment || p.category || p.minSeverity || p.target || p.analysis || p.from || p.to);
+  const commentSort = commentSortOptions.find(option => option.value === p.commentSort) ?? commentSortOptions[0];
   const minSeverity = Math.max(0, Math.min(100, Number(p.minSeverity || 0) || 0));
   const [filtered] = showSources ? [] : await db.select({ total: sql<number>`count(*)::int` }).from(socialItems)
     .leftJoin(socialAnalyses, eq(socialAnalyses.itemId, socialItems.id)).where(and(...commentConditions({ ...p, cursor: undefined })));
@@ -52,12 +53,6 @@ export default async function Home({ searchParams }: { searchParams: Promise<Par
   const stats = statsRow || { total: 0, normal: 0, critical: 0, needsReview: 0 };
   const advancedFilters = Boolean(p.sentiment || p.category || p.review || p.needsReview || p.target || p.analysis || p.from || p.to || minSeverity);
   const views = [["", "Tüm yorumlar"], ["pending", "İnceleme bekleyen"], ["urgent", "Acil inceleme"], ["normal", "İnceleme gerekmeyen"], ["risk", "Yüksek öncelik"], ["threats", "Eski analiz: tehdit"], ["confirmed", "İnsan onaylı saldırılar"], ["history", "Geçmiş arşivi · AI yok"], ["failed", "Analizi başarısız"], ["unavailable", "Kaynağa erişilemiyor"], ["human", "İnsan değerlendirmesi olan"]];
-  function viewHref(view: string) {
-    const params = new URLSearchParams({ mode: "comments" });
-    for (const key of ["source", "sourceQ", "sourceAfter", "video", "q", "platform", "connection", "target", "from", "to"] as const) if (p[key]) params.set(key, p[key]!);
-    if (view) params.set("view", view);
-    return `/?${params}`;
-  }
   return <div className="shell">
     <AdminNav />
     <main className="container comments-workspace">
@@ -72,38 +67,36 @@ export default async function Home({ searchParams }: { searchParams: Promise<Par
       <nav className="source-mode-nav" aria-label="İnceleme düzeni"><Link href="/?mode=sources" aria-current={showSources ? "page" : undefined}>Paylaşımlar</Link><Link href="/?mode=comments" aria-current={!showSources ? "page" : undefined}>Tüm yorumlar</Link></nav>
       {showSources ? <SourceBrowser params={p} connections={connections} /> : <>
       {p.source ? <SourceBrowser params={p} connections={connections} selected /> : null}
-      <section className="panel" style={{marginBottom:18}}>
-        <div className="panel-body">
-          <form className="comment-filters" method="get">
+      <section aria-label="Yorum filtreleri">
+          <form key={JSON.stringify(p)} className="comment-filters source-search" method="get" action="/">
             <input type="hidden" name="mode" value="comments" />
-            {["source", "sourceQ", "sourceAfter", "video"].map((key) => p[key as keyof Params] ? <input key={key} type="hidden" name={key} value={p[key as keyof Params]} /> : null)}
-            {p.view ? <input type="hidden" name="view" value={p.view} /> : null}
-            <div className="filter-bar">
-            <input className="input search-input" name="q" aria-label="Yorum içinde ara" defaultValue={p.q || ""} placeholder="Bir kelime, isim veya ifade ara…" />
-            <select className="select" name="platform" aria-label="Platform" defaultValue={p.platform || ""}><option value="">Tüm platformlar</option><option value="instagram">Instagram</option><option value="facebook">Facebook</option><option value="youtube">YouTube</option></select>
-            <select className="select" name="connection" aria-label="Hesap" defaultValue={p.connection || ""}><option value="">Tüm hesaplar</option>{connections.map((connection) => <option key={connection.id} value={connection.id}>{connection.displayName}</option>)}</select>
-            <button className="btn primary" type="submit">Göster</button>
+            {["source", "sourceQ", "sourceAfter", "sourceSort", "sourceFilter", "video"].map((key) => p[key as keyof Params] ? <input key={key} type="hidden" name={key} value={p[key as keyof Params]} /> : null)}
+            <div className="source-search-main"><label>Yorumlarda ara<div className="source-search-input"><UiIcon name="search" size={17} /><input className="input" name="q" defaultValue={p.q || ""} maxLength={120} placeholder="Yorum içindeki kelime, isim veya ifade" /></div></label>
+              <button className="btn source-search-submit" type="submit"><UiIcon name="search" size={16} />Yorumları bul</button></div>
+            <div className="source-search-filters">
+            <label><span><UiIcon name="target" size={14} />Platform</span><select className="select" name="platform" defaultValue={p.platform || ""}><option value="">Tüm platformlar</option><option value="instagram">Instagram</option><option value="facebook">Facebook</option><option value="youtube">YouTube</option></select></label>
+            <label><span><UiIcon name="accounts" size={14} />Bağlı hesap</span><select className="select" name="connection" defaultValue={p.connection || ""}><option value="">Tüm hesaplar</option>{connections.map((connection) => <option key={connection.id} value={connection.id}>{connection.displayName}</option>)}</select></label>
+            <label><span><UiIcon name="sort" size={14} />Sıralama</span><select className="select" name="commentSort" defaultValue={commentSort.value}>{commentSortOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+            <label><span><UiIcon name="filter" size={14} />Yorum durumu</span><select className="select" name="view" defaultValue={p.view || ""}>{views.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
             </div>
-            <details className="advanced-filters" open={advancedFilters}><summary>Detaylı filtreler{advancedFilters ? <span className="badge blue">Filtre seçili</span> : null}</summary><div className="filters">
-            <select className="select" name="sentiment" aria-label="Yorumun tonu" defaultValue={p.sentiment || ""}><option value="">Eski analiz: tüm tonlar</option><option value="negative">Olumsuz</option><option value="neutral">Nötr</option><option value="positive">Olumlu</option></select>
-            <select className="select" name="category" aria-label="Yorum kategorisi" defaultValue={p.category || ""}><option value="">Eski analiz: tüm kategoriler</option><option value="criticism">Eleştiri</option><option value="insult">Hakaret</option><option value="accusation">İddia</option><option value="threat">Tehdit</option><option value="mockery">Alay</option><option value="spam">Spam</option><option value="support">Destek</option><option value="other">Diğer</option></select>
-            <select className="select" name="review" aria-label="İnceleme durumu" defaultValue={p.review || ""}><option value="">Tüm inceleme durumları</option><option value="new">Yeni</option><option value="reviewed">İncelendi</option><option value="escalated">Önceliklendirildi</option><option value="ignored">Dikkate alınmadı</option></select>
-            <select className="select" name="needsReview" aria-label="LLM inceleme gereksinimi" defaultValue={p.needsReview || ""}><option value="">Tüm inceleme kararları</option><option value="true">LLM insan incelemesi istiyor</option></select>
-            <select className="select" name="target" aria-label="Kişi veya kurum bağlamı" defaultValue={p.target || ""}><option value="">Tüm kişi / kurum bağlamları</option>{targets.map((target) => <option key={target.id} value={target.name}>{target.name}</option>)}</select>
-            <select className="select" name="analysis" aria-label="Analiz durumu" defaultValue={p.analysis || ""}><option value="">Tüm analiz durumları</option><option value="pending">Analiz bekliyor</option><option value="processing">Analiz ediliyor</option><option value="retry">Tekrar denenecek</option><option value="complete">Analiz tamamlandı</option><option value="dead">Analiz tamamlanamadı</option></select>
-            <label className="small muted">Alınma başlangıcı (UTC)<input className="input" name="from" type="date" defaultValue={p.from || ""} /></label>
-            <label className="small muted">Alınma bitişi (UTC)<input className="input" name="to" type="date" defaultValue={p.to || ""} /></label>
-            <input className="input" name="minSeverity" aria-label="En düşük öncelik puanı" type="number" min="0" max="100" defaultValue={minSeverity || ""} placeholder="Eski analiz: en düşük puan" />
-            </div><p className="small muted">Kişi / kurum filtresi insan değerlendirmesini, yoksa eski AI eşleşmesini veya yeni etiketlerde hesabın kişi / kurum bağlamını kullanır. Hesap bağlamı yorumun hedefini doğrulamaz; harici yayınlarda hesap eşleştirmesi kullanılmaz.</p></details><div className="filter-footer"><span>Son alınan yorumlar önce gösterilir.</span><Link className="text-link" href={p.source ? `/?mode=comments&source=${encodeURIComponent(p.source)}` : "/?mode=comments"}>Yorum filtrelerini temizle</Link></div>
+            <details className="advanced-filters" open={advancedFilters}><summary>Detaylı filtreler{advancedFilters ? <span className="badge blue">Filtre seçili</span> : null}</summary><div className="filters source-search-filters">
+            <label><span><UiIcon name="comments" size={14} />Yorumun tonu</span><select className="select" name="sentiment" defaultValue={p.sentiment || ""}><option value="">Eski analiz: tüm tonlar</option><option value="negative">Olumsuz</option><option value="neutral">Nötr</option><option value="positive">Olumlu</option></select></label>
+            <label><span><UiIcon name="filter" size={14} />Yorum kategorisi</span><select className="select" name="category" defaultValue={p.category || ""}><option value="">Eski analiz: tüm kategoriler</option><option value="criticism">Eleştiri</option><option value="insult">Hakaret</option><option value="accusation">İddia</option><option value="threat">Tehdit</option><option value="mockery">Alay</option><option value="spam">Spam</option><option value="support">Destek</option><option value="other">Diğer</option></select></label>
+            <label><span><UiIcon name="check" size={14} />İnceleme durumu</span><select className="select" name="review" defaultValue={p.review || ""}><option value="">Tüm inceleme durumları</option><option value="new">Yeni</option><option value="reviewed">İncelendi</option><option value="escalated">Önceliklendirildi</option><option value="ignored">Dikkate alınmadı</option></select></label>
+            <label><span><UiIcon name="shield" size={14} />AI inceleme kararı</span><select className="select" name="needsReview" defaultValue={p.needsReview || ""}><option value="">Tüm inceleme kararları</option><option value="true">AI insan incelemesi istiyor</option></select></label>
+            <label><span><UiIcon name="target" size={14} />Kişi veya kurum bağlamı</span><select className="select" name="target" defaultValue={p.target || ""}><option value="">Tüm kişi / kurum bağlamları</option>{targets.map((target) => <option key={target.id} value={target.name}>{target.name}</option>)}</select></label>
+            <label><span><UiIcon name="spark" size={14} />Analiz durumu</span><select className="select" name="analysis" defaultValue={p.analysis || ""}><option value="">Tüm analiz durumları</option><option value="pending">Analiz bekliyor</option><option value="processing">Analiz ediliyor</option><option value="retry">Tekrar denenecek</option><option value="complete">Analiz tamamlandı</option><option value="dead">Analiz tamamlanamadı</option></select></label>
+            <label><span><UiIcon name="filter" size={14} />Alınma başlangıcı (UTC)</span><input className="input" name="from" type="date" defaultValue={p.from || ""} /></label>
+            <label><span><UiIcon name="filter" size={14} />Alınma bitişi (UTC)</span><input className="input" name="to" type="date" defaultValue={p.to || ""} /></label>
+            <label><span><UiIcon name="bell" size={14} />En düşük öncelik puanı</span><input className="input" name="minSeverity" type="number" min="0" max="100" defaultValue={minSeverity || ""} placeholder="Eski analiz: en düşük puan" /></label>
+            </div><p className="small muted">Kişi / kurum filtresi insan değerlendirmesini, yoksa eski AI eşleşmesini veya yeni etiketlerde hesabın kişi / kurum bağlamını kullanır. Hesap bağlamı yorumun hedefini doğrulamaz; harici yayınlarda hesap eşleştirmesi kullanılmaz.</p></details><div className="filter-footer"><span>{commentSort.label}</span><Link className="text-link" href={p.source ? `/?mode=comments&source=${encodeURIComponent(p.source)}` : "/?mode=comments"}><UiIcon name="refresh" size={14} />Yorum filtrelerini temizle</Link></div>
           </form>
-        </div>
       </section>
 
       <section className="comment-feed">
         <div className="feed-head"><div><h2>{p.source ? "Bu paylaşımın yorumları" : "Tüm yorumlar"}</h2><p className="section-description">{p.source ? "Seçilen paylaşıma ait yorumlar ve yanıtlar." : "Bütün kaynaklardan alınan yorumlar."}</p></div><span className="badge">{filtered?.total ?? 0} yorum</span></div>
-        <nav className="review-views" aria-label="Hazır inceleme görünümleri">{views.map(([value, label]) => <Link key={value} href={viewHref(value)} className={value === (p.view ?? "") ? "is-active" : ""} aria-current={value === (p.view ?? "") ? "page" : undefined}>{label}</Link>)}</nav>
         {visibleRows.length === 0 ? <div className="empty empty-feature"><span className="empty-symbol"><UiIcon name="comments" size={30} /></span><h2>{p.source || p.video ? "Bu paylaşım için yorum bulunamadı." : "Bu görünümde yorum bulunamadı."}</h2><p>Seçili filtreler alınan yorumları gizleyebilir. Henüz yorum alınmadıysa izleme listesindeki tarama durumunu kontrol edebilirsin.</p><div className="btn-row"><Link className="btn primary" href={p.source ? `/?mode=comments&source=${encodeURIComponent(p.source)}` : "/?mode=comments"}>Yorum filtrelerini temizle</Link><Link className="btn" href="/settings/videos">İzleme listesi</Link></div></div> : null}
-        <CommentWorkspace key={JSON.stringify([p.source, p.video, p.view, p.q, p.platform, p.connection, p.target, p.from, p.to, p.cursor, p.review, p.category, p.analysis, p.needsReview, p.minSeverity, p.sentiment])} rows={visibleRows.map(({ item, analysis, connectionName, parentText }) => ({ item: { ...item,
+        <CommentWorkspace key={JSON.stringify([p.source, p.video, p.view, p.q, p.platform, p.connection, p.target, p.from, p.to, p.cursor, p.commentSort, p.review, p.category, p.analysis, p.needsReview, p.minSeverity, p.sentiment])} rows={visibleRows.map(({ item, analysis, connectionName, parentText }) => ({ item: { ...item,
           raw: commentDisplay(item.raw) },
           analysis: analysis ? { ...analysis, raw: null } : null, connectionName, parentText }))} updateCursor={updateCursor}
           nextCursor={nextCursor} filters={Object.fromEntries(Object.entries(p).filter(([, value]) => typeof value === "string"))} total={filtered?.total ?? 0} />
