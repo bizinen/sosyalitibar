@@ -1,14 +1,18 @@
 import crypto from "node:crypto";
-import { and, asc, eq, inArray, lte, or } from "drizzle-orm";
-import { db } from "@/lib/db";
+import { and, asc, eq, inArray, isNull, lte, sql } from "drizzle-orm";
+import { db, type Transaction } from "@/lib/db";
 import { alertOutbox, connectionTargets, monitoringTargets, socialAnalyses, socialConnections, socialItems } from "@/db/schema";
-import { analyzeComment, PROMPT_VERSION, type Analysis } from "@/lib/llm";
-import { log } from "@/lib/log";
+import { analyzeComment, type AnalyzeCommentInput, type LlmResult } from "@/lib/llm";
+import { createBatchAnalyzer, type TriageResult } from "@/lib/batch-triage";
+import type { getLlmSettings } from "@/lib/llm-settings";
+import { mapLimit } from "@/lib/concurrency";
+import { log, safeErrorMessage } from "@/lib/log";
+import { invalidateAnalyses, lockAnalysisContext } from "@/lib/analysis-state";
 import { enqueueAlertIfNeeded } from "@/lib/alerts";
 
 export type SocialItemInput = {
   connectionId?: string | null;
-  platform: "facebook" | "instagram";
+  platform: "facebook" | "instagram" | "youtube";
   externalId: string;
   parentExternalId?: string | null;
   rootExternalId?: string | null;
@@ -18,14 +22,39 @@ export type SocialItemInput = {
   text: string;
   permalink?: string | null;
   sourceCreatedAt?: Date | null;
+  sourceReadVersion?: number;
   raw?: unknown;
 };
 
-export async function upsertSocialItem(input: SocialItemInput) {
+export async function beginSourceRead(): Promise<number> {
+  const rows = await db.execute(sql`select nextval('social_item_source_read_seq')::text as version`);
+  const version = Number(rows[0]?.version);
+  if (!Number.isSafeInteger(version) || version < 1) throw new Error("source read version invalid");
+  return version;
+}
+
+function sourcePostText(raw: unknown, rootId: string | null | undefined): string | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const post = (raw as Record<string, unknown>).source_post;
+  if (!post || typeof post !== "object" || Array.isArray(post)) return null;
+  const context = post as Record<string, unknown>;
+  return context.id === rootId && typeof context.text === "string" ? context.text : null;
+}
+
+export async function upsertSocialItem(input: SocialItemInput, assertOwnership?: (tx: Transaction) => Promise<void>) {
+  if (typeof input.externalId !== "string" || !input.externalId.trim() || typeof input.text !== "string") {
+    throw new Error("source item identity or text invalid");
+  }
+  if (input.parentExternalId === input.externalId) throw new Error("source item cannot be its own parent");
+  const sourceReadVersion = input.sourceReadVersion ?? await beginSourceRead();
+  if (!Number.isSafeInteger(sourceReadVersion) || sourceReadVersion < 1) throw new Error("source read version invalid");
   return db.transaction(async (tx) => {
-    const existing = await tx.query.socialItems.findFirst({
-      where: and(eq(socialItems.platform, input.platform), eq(socialItems.externalId, input.externalId)),
-    });
+    await lockAnalysisContext(tx, true);
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${input.platform}), hashtext(${input.externalId}))`);
+    const [existing] = await tx.select().from(socialItems).where(and(
+      eq(socialItems.platform, input.platform), eq(socialItems.externalId, input.externalId),
+    )).for("update");
+    await assertOwnership?.(tx);
     const now = new Date();
 
     if (!existing) {
@@ -41,15 +70,35 @@ export async function upsertSocialItem(input: SocialItemInput) {
         text: input.text,
         permalink: input.permalink ?? null,
         sourceCreatedAt: input.sourceCreatedAt ?? null,
+        sourceReadVersion,
+        sourceCheckedAt: now,
         raw: input.raw as never,
         analysisStatus: "pending",
         analysisAvailableAt: now,
       }).returning();
       if (!created) throw new Error("social item oluşturulamadı");
+      await invalidateAnalyses(tx, and(eq(socialItems.platform, input.platform), eq(socialItems.parentExternalId, input.externalId)));
       return { item: created, created: true, changed: true };
     }
 
-    const changed = existing.text !== input.text;
+    if (existing.deletedAt) return { item: existing, created: false, changed: false };
+    if (existing.sourceReadVersion >= sourceReadVersion) return { item: existing, created: false, changed: false };
+    const incomingRaw = input.raw && typeof input.raw === "object" && !Array.isArray(input.raw) ? input.raw as Record<string, unknown> : undefined;
+    const previousRaw = existing.raw && typeof existing.raw === "object" && !Array.isArray(existing.raw) ? existing.raw as Record<string, unknown> : undefined;
+    let raw = incomingRaw && incomingRaw.source_post === undefined && previousRaw?.source_post !== undefined
+      && (input.rootExternalId ?? existing.rootExternalId) === existing.rootExternalId
+      ? { ...incomingRaw, source_post: previousRaw.source_post } : input.raw;
+    if (raw && typeof raw === "object" && !Array.isArray(raw) && previousRaw?.watched_video_id
+      && incomingRaw?.watched_video_id === undefined && (input.rootExternalId ?? existing.rootExternalId) === existing.rootExternalId) {
+      raw = { ...raw, watched_video_id: previousRaw.watched_video_id, external_source: previousRaw.external_source, source_channel: previousRaw.source_channel };
+    }
+    const changed = Boolean(existing.sourceUnavailableAt) || existing.text !== input.text || Boolean(input.connectionId && input.connectionId !== existing.connectionId)
+      || Boolean(input.parentExternalId && input.parentExternalId !== existing.parentExternalId)
+      || Boolean(input.itemType && input.itemType !== existing.itemType)
+      || Boolean(input.rootExternalId && input.rootExternalId !== existing.rootExternalId)
+      || (incomingRaw !== undefined && Boolean(incomingRaw.context_incomplete) !== Boolean(previousRaw?.context_incomplete))
+      || (raw !== undefined && Boolean((raw as Record<string, unknown>)?.external_source) !== Boolean(previousRaw?.external_source))
+      || (raw !== undefined && sourcePostText(raw, input.rootExternalId ?? existing.rootExternalId) !== sourcePostText(existing.raw, existing.rootExternalId));
     const [updated] = await tx.update(socialItems).set({
       connectionId: input.connectionId ?? existing.connectionId,
       parentExternalId: input.parentExternalId ?? existing.parentExternalId,
@@ -60,9 +109,14 @@ export async function upsertSocialItem(input: SocialItemInput) {
       text: input.text,
       permalink: input.permalink ?? existing.permalink,
       sourceCreatedAt: input.sourceCreatedAt ?? existing.sourceCreatedAt,
-      raw: input.raw as never,
+      sourceReadVersion,
+      sourceCheckedAt: now,
+      sourceUnavailableAt: null,
+      raw: raw as never,
       ...(changed ? {
+        reviewStatus: "new",
         analysisStatus: "pending",
+        analysisRevision: existing.analysisRevision + 1,
         analysisAttempts: 0,
         analysisAvailableAt: now,
         analysisLockedAt: null,
@@ -79,53 +133,56 @@ export async function upsertSocialItem(input: SocialItemInput) {
         lockId: null,
         lastError: "source text changed; superseded by re-analysis",
         updatedAt: now,
-      }).where(and(eq(alertOutbox.itemId, existing.id), inArray(alertOutbox.status, ["pending", "retry"])));
+      }).where(and(eq(alertOutbox.itemId, existing.id), sql`(${alertOutbox.status} in ('pending', 'retry', 'dead') or (${alertOutbox.status} = 'processing' and ${alertOutbox.dispatchStartedAt} is null))`));
+      await invalidateAnalyses(tx, and(eq(socialItems.platform, input.platform), eq(socialItems.parentExternalId, input.externalId)));
     }
     return { item: updated ?? existing, created: false, changed };
   });
 }
 
-function deterministicEmptyAnalysis(): Analysis {
-  return {
-    target_match: false,
-    target_confidence: 0,
-    matched_target: null,
-    sentiment: "neutral",
-    category: "spam",
-    severity: 0,
-    contains_insult: false,
-    contains_threat: false,
-    contains_claim: false,
-    claim_text: null,
-    needs_review: false,
-    summary: "Analiz edilecek anlamlı metin bulunamadı.",
-  };
+export async function markSourceUnavailable(itemId: string, sourceReadVersion: number, assertOwnership: (tx: Transaction) => Promise<void>) {
+  if (!Number.isSafeInteger(sourceReadVersion) || sourceReadVersion < 1) throw new Error("source read version invalid");
+  return db.transaction(async (tx) => {
+    await lockAnalysisContext(tx, true);
+    const [item] = await tx.select().from(socialItems).where(eq(socialItems.id, itemId)).for("update");
+    await assertOwnership(tx);
+    if (!item || item.deletedAt || item.sourceReadVersion >= sourceReadVersion) return;
+    if (!item.sourceUnavailableAt) await invalidateAnalyses(tx, and(eq(socialItems.platform, item.platform),
+      sql`(${socialItems.id} = ${item.id} or ${socialItems.parentExternalId} = ${item.externalId})`));
+    await tx.update(socialItems).set({ sourceReadVersion, sourceCheckedAt: new Date(),
+      sourceUnavailableAt: item.sourceUnavailableAt ?? new Date(), analysisStatus: "complete",
+      analysisLockedAt: null, analysisLockId: null, analysisError: "Meta source unavailable; deletion not confirmed", updatedAt: new Date(),
+    }).where(eq(socialItems.id, item.id));
+  });
 }
 
-async function persistAnalysis(itemId: string, result: {
-  data: Analysis;
-  model: string;
-  provider: string;
-  promptVersion: string;
-  inputHash: string;
-  latencyMs: number;
-  raw: Record<string, unknown>;
-}) {
-  const a = result.data;
-  await db.insert(socialAnalyses).values({
-    itemId,
-    targetMatch: a.target_match,
-    targetConfidence: a.target_confidence,
-    matchedTarget: a.matched_target,
-    sentiment: a.sentiment,
-    category: a.category,
-    severity: a.severity,
-    containsInsult: a.contains_insult,
-    containsThreat: a.contains_threat,
-    containsClaim: a.contains_claim,
-    claimText: a.claim_text,
-    needsReview: a.needs_review,
-    summary: a.summary,
+async function persistAnalysis(item: typeof socialItems.$inferSelect, lockId: string, result: LlmResult | TriageResult) {
+  return db.transaction(async (tx) => {
+  await lockAnalysisContext(tx);
+  const [owned] = await tx.update(socialItems).set({
+    analysisStatus: "complete", analysisLockedAt: null, analysisLockId: null,
+    analysisError: null, updatedAt: new Date(),
+  }).where(and(eq(socialItems.id, item.id), eq(socialItems.analysisLockId, lockId),
+    eq(socialItems.analysisStatus, "processing"), eq(socialItems.analysisRevision, item.analysisRevision)))
+    .returning({ id: socialItems.id });
+  if (!owned) return false;
+  const label = "label" in result.data ? result.data.label : null;
+  const a = "label" in result.data ? null : result.data;
+  await tx.insert(socialAnalyses).values({
+    itemId: item.id,
+    targetMatch: a?.target_match ?? null,
+    targetConfidence: a?.target_confidence ?? null,
+    matchedTarget: a?.matched_target ?? null,
+    sentiment: a?.sentiment ?? null,
+    category: a?.category ?? null,
+    severity: a?.severity ?? null,
+    containsInsult: a?.contains_insult ?? null,
+    containsThreat: a?.contains_threat ?? null,
+    containsClaim: a?.contains_claim ?? null,
+    claimText: a?.claim_text ?? null,
+    needsReview: label ? label !== "inceleme_gerekmiyor" : a!.needs_review,
+    summary: a?.summary ?? null,
+    triageLabel: label,
     provider: result.provider,
     model: result.model,
     promptVersion: result.promptVersion,
@@ -135,18 +192,19 @@ async function persistAnalysis(itemId: string, result: {
   }).onConflictDoUpdate({
     target: socialAnalyses.itemId,
     set: {
-      targetMatch: a.target_match,
-      targetConfidence: a.target_confidence,
-      matchedTarget: a.matched_target,
-      sentiment: a.sentiment,
-      category: a.category,
-      severity: a.severity,
-      containsInsult: a.contains_insult,
-      containsThreat: a.contains_threat,
-      containsClaim: a.contains_claim,
-      claimText: a.claim_text,
-      needsReview: a.needs_review,
-      summary: a.summary,
+      targetMatch: a?.target_match ?? null,
+      targetConfidence: a?.target_confidence ?? null,
+      matchedTarget: a?.matched_target ?? null,
+      sentiment: a?.sentiment ?? null,
+      category: a?.category ?? null,
+      severity: a?.severity ?? null,
+      containsInsult: a?.contains_insult ?? null,
+      containsThreat: a?.contains_threat ?? null,
+      containsClaim: a?.contains_claim ?? null,
+      claimText: a?.claim_text ?? null,
+      needsReview: label ? label !== "inceleme_gerekmiyor" : a!.needs_review,
+      summary: a?.summary ?? null,
+      triageLabel: label,
       provider: result.provider,
       model: result.model,
       promptVersion: result.promptVersion,
@@ -156,47 +214,60 @@ async function persistAnalysis(itemId: string, result: {
       analyzedAt: new Date(),
     },
   });
+  await enqueueAlertIfNeeded(item, result.data, result.inputHash, tx);
+  return true;
+  });
 }
 
-export async function analyzeClaimedItem(itemId: string, lockId: string) {
+export async function analyzeClaimedItem(itemId: string, lockId: string, analyzer: (input: AnalyzeCommentInput) => Promise<LlmResult | TriageResult> = analyzeComment) {
   const item = await db.query.socialItems.findFirst({
     where: and(eq(socialItems.id, itemId), eq(socialItems.analysisStatus, "processing"), eq(socialItems.analysisLockId, lockId)),
   });
   if (!item) return { processed: false as const, reason: "lost_lock" };
-  if (item.deletedAt) {
-    await db.update(socialItems).set({
+  if (item.deletedAt || item.sourceUnavailableAt) {
+    const changed = await db.update(socialItems).set({
       analysisStatus: "complete",
       analysisLockedAt: null,
       analysisLockId: null,
-      analysisError: "source item deleted before analysis",
+      analysisError: item.sourceUnavailableAt ? "Meta source unavailable; deletion not confirmed" : "source item deleted before analysis",
       updatedAt: new Date(),
-    }).where(and(eq(socialItems.id, item.id), eq(socialItems.analysisLockId, lockId)));
+    }).where(and(eq(socialItems.id, item.id), eq(socialItems.analysisLockId, lockId),
+      eq(socialItems.analysisStatus, "processing"), eq(socialItems.analysisRevision, item.analysisRevision)))
+      .returning({ id: socialItems.id });
+    if (!changed.length) return { processed: false as const, reason: "lost_lock" };
     return { processed: true as const, reason: "deleted" };
   }
 
   try {
-    if (item.text.trim().length < 2) {
-      const data = deterministicEmptyAnalysis();
-      await persistAnalysis(item.id, {
+    let persisted: boolean;
+    if (item.text.trim().length === 0) {
+      const data = { label: "insan_incelemesi_gerekli" as const };
+      persisted = await persistAnalysis(item, lockId, {
         data,
         model: "deterministic",
         provider: "local",
-        promptVersion: PROMPT_VERSION,
+        promptVersion: "triage-v1:empty",
         inputHash: crypto.createHash("sha256").update(item.text).digest("hex"),
         latencyMs: 0,
-        raw: { output: data },
+        raw: { output: data, reason: "empty_text", modelCalled: false },
       });
     } else {
-      const targets = await db.select().from(monitoringTargets).where(eq(monitoringTargets.enabled, true));
+      const context = await db.transaction(async (tx) => {
+      await lockAnalysisContext(tx);
+      const targets = await tx.select().from(monitoringTargets).where(eq(monitoringTargets.enabled, true));
       let sourceTargets: string[] = [];
       let source: { platform?: string; accountName?: string | null; accountUsername?: string | null; itemType?: string } = {
         platform: item.platform,
         itemType: item.itemType,
       };
-      if (item.connectionId) {
+      const externalSource = Boolean(item.raw && typeof item.raw === "object" && (item.raw as Record<string, unknown>).external_source);
+      if (externalSource) {
+        source.accountName = typeof (item.raw as Record<string, unknown>).source_channel === "string" ? String((item.raw as Record<string, unknown>).source_channel) : null;
+      }
+      if (item.connectionId && !externalSource) {
         const [connection, mapped] = await Promise.all([
-          db.query.socialConnections.findFirst({ where: eq(socialConnections.id, item.connectionId) }),
-          db.select({ name: monitoringTargets.name })
+          tx.query.socialConnections.findFirst({ where: eq(socialConnections.id, item.connectionId) }),
+          tx.select({ name: monitoringTargets.name })
             .from(connectionTargets)
             .innerJoin(monitoringTargets, eq(connectionTargets.targetId, monitoringTargets.id))
             .where(and(eq(connectionTargets.connectionId, item.connectionId), eq(monitoringTargets.enabled, true))),
@@ -209,29 +280,54 @@ export async function analyzeClaimedItem(itemId: string, lockId: string) {
           itemType: item.itemType,
         };
       }
-      const analyzed = await analyzeComment({
-        text: item.text,
-        targets: targets.map((t) => ({ name: t.name, aliases: t.aliases })),
-        sourceTargets,
-        source,
+      const parent = item.parentExternalId && item.parentExternalId !== item.externalId
+        ? await tx.query.socialItems.findFirst({ where: and(eq(socialItems.platform, item.platform), eq(socialItems.externalId, item.parentExternalId), isNull(socialItems.deletedAt), isNull(socialItems.sourceUnavailableAt)) })
+        : undefined;
+      return { targets, sourceTargets, source, parentText: parent?.text ?? null };
       });
-      await persistAnalysis(item.id, analyzed);
-      await enqueueAlertIfNeeded(item, analyzed.data, analyzed.inputHash);
+      let leaseLost = false;
+      let heartbeatPending: Promise<void> | undefined;
+      const heartbeat = async () => {
+        const held = await db.update(socialItems).set({ analysisLockedAt: new Date() })
+          .where(and(eq(socialItems.id, item.id), eq(socialItems.analysisLockId, lockId),
+            eq(socialItems.analysisStatus, "processing"), eq(socialItems.analysisRevision, item.analysisRevision)))
+          .returning({ id: socialItems.id });
+        if (!held.length) leaseLost = true;
+      };
+      await heartbeat();
+      if (leaseLost) return { processed: false as const, reason: "lost_lock" };
+      const timer = setInterval(() => {
+        if (heartbeatPending || leaseLost) return;
+        heartbeatPending = heartbeat().catch(() => {
+          leaseLost = true;
+          log.warn("analysis.heartbeat_failed", { itemId: item.id });
+        }).finally(() => { heartbeatPending = undefined; });
+      }, 60_000);
+      let analyzed;
+      try {
+      analyzed = await analyzer({
+        text: item.text,
+        targets: context.targets.map((t) => ({ name: t.name, aliases: t.aliases })),
+        sourceTargets: context.sourceTargets,
+        source: context.source,
+        parentText: context.parentText,
+        postText: sourcePostText(item.raw, item.rootExternalId),
+        contextIncomplete: Boolean(item.raw && typeof item.raw === "object" && (item.raw as Record<string, unknown>).context_incomplete),
+      });
+      } finally {
+        clearInterval(timer);
+        await heartbeatPending;
+      }
+      if (leaseLost) return { processed: false as const, reason: "lost_lock" };
+      persisted = await persistAnalysis(item, lockId, analyzed);
     }
-    await db.update(socialItems).set({
-      analysisStatus: "complete",
-      analysisLockedAt: null,
-      analysisLockId: null,
-      analysisError: null,
-      updatedAt: new Date(),
-    }).where(and(eq(socialItems.id, item.id), eq(socialItems.analysisLockId, lockId)));
-    return { processed: true as const };
+    return persisted ? { processed: true as const } : { processed: false as const, reason: "lost_lock" };
   } catch (error) {
     const attempts = item.analysisAttempts + 1;
     const dead = attempts >= 5;
     const delayMs = Math.min(60 * 60 * 1000, 30_000 * 2 ** Math.max(0, attempts - 1));
-    const message = error instanceof Error ? error.message.slice(0, 1200) : String(error).slice(0, 1200);
-    await db.update(socialItems).set({
+    const message = safeErrorMessage(error);
+    const changed = await db.update(socialItems).set({
       analysisStatus: dead ? "dead" : "retry",
       analysisAttempts: attempts,
       analysisAvailableAt: dead ? new Date() : new Date(Date.now() + delayMs),
@@ -239,10 +335,28 @@ export async function analyzeClaimedItem(itemId: string, lockId: string) {
       analysisLockId: null,
       analysisError: message,
       updatedAt: new Date(),
-    }).where(and(eq(socialItems.id, item.id), eq(socialItems.analysisLockId, lockId)));
+    }).where(and(eq(socialItems.id, item.id), eq(socialItems.analysisLockId, lockId),
+      eq(socialItems.analysisStatus, "processing"), eq(socialItems.analysisRevision, item.analysisRevision)))
+      .returning({ id: socialItems.id });
+    if (!changed.length) return { processed: false as const, reason: "lost_lock" };
     log.warn("analysis.failed", { itemId: item.id, attempts, dead, message });
     return { processed: false as const, reason: dead ? "dead" : "retry" };
   }
+}
+
+export async function processAnalysisJobs(jobs: Array<{ id: string; lockId: string }>, cfg: Awaited<ReturnType<typeof getLlmSettings>>) {
+  const analyzer = createBatchAnalyzer(jobs.length, cfg);
+  const completions: Array<Promise<Awaited<ReturnType<typeof analyzeClaimedItem>>>> = [];
+  // Bound context reads separately from waiting for the shared provider response.
+  await mapLimit(jobs, cfg.ANALYSIS_CONCURRENCY, (job) => new Promise<void>((ready) => {
+    const work = analyzeClaimedItem(job.id, job.lockId, (input) => {
+      ready();
+      return analyzer(input);
+    });
+    completions.push(work);
+    void work.then(() => ready(), () => ready());
+  }));
+  return mapLimit(completions, cfg.ANALYSIS_CONCURRENCY, (work) => work);
 }
 
 export async function claimAnalysisJobs(limit = 20): Promise<Array<{ id: string; lockId: string }>> {

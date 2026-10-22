@@ -1,11 +1,19 @@
 # Production Operations Runbook
 
+## Trusted proxy and login rate limits
+
+`TRUST_PROXY=false` is the default: forwarded IP headers are ignored and requests share the `unknown` IP rate-limit bucket. Enable `TRUST_PROXY=true` only when the app is inaccessible except through your trusted reverse proxy. That proxy must overwrite (not append to client-supplied) `X-Forwarded-For` and `X-Real-IP` with the verified client IP. The app accepts only IP literals and uses the first forwarded address. Do not expose the app port directly when this flag is enabled.
+
 ## Süreçler
 
 Production'da iki uygulama prosesi çalıştırın:
 
 1. `app`: Next.js HTTP server
 2. `worker`: `node scripts/scheduler.mjs`
+
+Yerel geliştirmede `npm run dev` yalnız HTTP sunucusunu başlatır. Yorum toplama, analiz ve alarm kuyrukları için ayrı terminalde `npm run worker` çalıştırın; bu komut `.env.local` dosyasını yükler. Sunucu açık olsa bile worker çalışmıyorsa izlenen videolar "İlk tarama bekleniyor" durumunda kalır.
+
+Video işçisinin heartbeat kaydı için `0023_video_worker_heartbeat.sql` migration'ı da uygulanmalıdır; önceki DB kuralı yalnız eski görevleri kabul eder.
 
 Worker durursa webhook, analysis ve alarm işleri kaybolmaz; `pending/retry` bekler. `processing` durumunda ölü kalan locklar recovery ile tekrar kuyruğa alınır.
 
@@ -126,6 +134,10 @@ Webhook sorununda reconciliation veriyi telafi edebilir; ancak webhook arızası
 ## Reconciliation
 
 Worker küçük connection batch'leri seçer ve `sync_attempted_at` en eski/null olanı önce işler. Claim atomik `FOR UPDATE SKIP LOCKED` + DB lease kullanır; birden fazla worker replica aynı connection'ı eşzamanlı taramaz. Uzun taramada worker lease heartbeat yeniler; lease kaybedilirse eski worker işlemi durdurur. Worker ölürse lease `SYNC_LEASE_MS` sonrası reclaim edilebilir. Böylece tek arızalı connection tüm hesapları bloke etmez.
+
+`RECONCILE_INTERVAL_MS` scheduled reconciliation için hesap başına minimum yeniden deneme aralığıdır; app ve worker aynı değeri almalıdır. Worker iş bulunan gruptan sonra `WORKER_POLL_MS` kadar bekleyip sıradaki zamanı gelmiş hesapları alır; boş kuyrukta en fazla 60 saniyelik idle polling kullanır. Endpoint hatasında tekrar deneme aralığı korunur. Manuel sync bu due filtresini atlar ama batch/concurrency ve lease sınırları geçerlidir; tek tıklama bütün hesapların tarandığı anlamına gelmez.
+
+Eski paylaşımın altında yeni yorum olabileceği için fetched paylaşım yalnız yaşından dolayı atlanmaz. `SYNC_LOOKBACK_DAYS` dışındaki fetched paylaşım sayısı `outsideLookbackParents` olarak raporlanır; bu değer sert paylaşım kesme sınırı değildir. `SYNC_MAX_POSTS_PER_CONNECTION` ve `SYNC_MAX_COMMENTS_PER_PARENT` her grubun sınırlarıdır. Kalan sayfalar ve taşan kayıtlar `syncState.continuation` içinde şifreli saklanır; scheduled reconciliation başarılı grupların devamını reconcile interval beklemeden alır. Hatalı grup normal retry aralığına döner, checkpoint ilerlemez. `coverageLimited=true` sınır veya bekleyen devam işini bildirir; tam geçmiş taramasının tamamlandığını göstermez. OAuth yeni token kaydederken eski tokenlı devamı temizler; taze tarama başlar. Gerçek Meta cursor ömrü ve outage recovery doğrulanmadı.
 
 Yük yüksekse:
 

@@ -1,15 +1,16 @@
 import { NextResponse } from "next/server";
-import { env } from "@/lib/config";
+import { env, llmConfigured } from "@/lib/config";
+import { getLlmSettings } from "@/lib/llm-settings";
 import { safeEqual } from "@/lib/security";
-import { analyzeClaimedItem, claimAnalysisJobs, requeueStaleAnalysisLocks } from "@/lib/ingest";
-import { mapLimit } from "@/lib/concurrency";
+import { processAnalysisJobs, claimAnalysisJobs, requeueStaleAnalysisLocks } from "@/lib/ingest";
 
 export async function POST(req: Request) {
   const auth = req.headers.get("authorization") || "";
   if (!safeEqual(auth, `Bearer ${env().CRON_SECRET}`)) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  const cfg = env();
+  const cfg = await getLlmSettings();
+  if (!llmConfigured(cfg)) return NextResponse.json({ error: "llm_not_configured" }, { status: 503 });
   const recovered = await requeueStaleAnalysisLocks();
-  const jobs = await claimAnalysisJobs(cfg.ANALYSIS_BATCH_SIZE);
-  const results = await mapLimit(jobs, cfg.ANALYSIS_CONCURRENCY, (job) => analyzeClaimedItem(job.id, job.lockId));
+  const jobs = await claimAnalysisJobs(cfg.policy.batchSize);
+  const results = await processAnalysisJobs(jobs, cfg);
   return NextResponse.json({ recovered, claimed: jobs.length, succeeded: results.filter((x) => x.processed).length, failed: results.filter((x) => !x.processed).length });
 }

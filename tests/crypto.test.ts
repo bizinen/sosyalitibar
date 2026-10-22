@@ -2,7 +2,6 @@ import { beforeEach, describe, expect, it } from "vitest";
 import crypto from "node:crypto";
 
 beforeEach(() => {
-  process.env.NODE_ENV = "test";
   process.env.APP_URL = "http://localhost:3000";
   process.env.DATABASE_URL = "postgresql://x:x@localhost:5432/x";
   process.env.ADMIN_USERNAME = "admin";

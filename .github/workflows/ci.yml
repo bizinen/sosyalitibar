@@ -28,14 +28,18 @@ jobs:
         with:
           node-version: 22
       - name: Install
-        run: if [ -f package-lock.json ]; then npm ci; else npm install --no-audit --no-fund; fi
+        run: npm ci --no-audit --no-fund
       - name: Migrate test database
+        run: npm run db:migrate
+      - name: Verify migration rerun
         run: npm run db:migrate
       - name: Database smoke test
         run: npm run db:smoke
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
+        env:
+          TEST_DATABASE_URL: postgresql://sosyal_itibar:test-password@127.0.0.1:5432/sosyal_itibar_test
       - run: npm run build
         env:
           APP_URL: https://example.test

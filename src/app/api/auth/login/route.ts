@@ -3,10 +3,10 @@ import { makeSession, sessionCookieName, sessionMaxAgeSeconds, verifyAdminCreden
 import { audit } from "@/lib/audit";
 import { clearLoginFailures, loginRateLimitState, recordLoginFailure } from "@/lib/rate-limit";
 import { assertSameOrigin, clientIp, hashIdentifier } from "@/lib/security";
-import { appOrigin } from "@/lib/config";
 
 export async function POST(req: Request) {
-  if (!assertSameOrigin(req)) return NextResponse.json({ error: "bad_origin" }, { status: 403 });
+  if (!(await assertSameOrigin(req))) return NextResponse.json({ error: "bad_origin" }, { status: 403 });
+  const requestOrigin = req.headers.get("origin") || new URL(req.headers.get("referer")!).origin;
   const keyHash = hashIdentifier(`login:${clientIp(req)}`);
   const limit = await loginRateLimitState(keyHash);
   if (!limit.allowed) {
@@ -19,16 +19,16 @@ export async function POST(req: Request) {
   if (!verifyAdminCredentials(username, password)) {
     await recordLoginFailure(keyHash);
     await audit({ request: req, actor: "anonymous", action: "auth.login.failed" });
-    return NextResponse.redirect(new URL("/login?error=1", appOrigin()), 303);
+    return NextResponse.redirect(new URL("/login?error=1", requestOrigin), 303);
   }
 
   await clearLoginFailures(keyHash);
   await audit({ request: req, actor: username, action: "auth.login.succeeded" });
-  const res = NextResponse.redirect(new URL("/", appOrigin()), 303);
+  const res = NextResponse.redirect(new URL("/", requestOrigin), 303);
   res.cookies.set(sessionCookieName, makeSession(username), {
     httpOnly: true,
     sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
+    secure: requestOrigin.startsWith("https:") || process.env.NODE_ENV === "production",
     path: "/",
     maxAge: sessionMaxAgeSeconds,
     priority: "high",

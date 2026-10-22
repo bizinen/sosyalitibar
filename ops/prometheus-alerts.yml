@@ -1,0 +1,67 @@
+groups:
+  - name: sosyal-itibar-pipeline
+    rules:
+      - alert: SosyalItibarWorkerStale
+        expr: sosyal_itibar_worker_stale == 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Worker görevi heartbeat göndermiyor"
+          description: "{{ $labels.job }} görevinin worker prosesini ve HTTP erişimini kontrol edin; kuyruk boş olsa da görev durmuş olabilir."
+      - alert: SosyalItibarWorkerJobFailed
+        expr: sosyal_itibar_worker_last_attempt_failed == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Worker görevinin son HTTP çalışması başarısız"
+          description: "{{ $labels.job }} için yapılandırma, app erişimi ve worker loglarını kontrol edin."
+      - alert: SosyalItibarMetricsUnavailable
+        expr: up{job="sosyal-itibar"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Sosyal İtibar metrics endpointine erişilemiyor"
+          description: "App/DB erişimini ve metrics Bearer kimlik bilgisini kontrol edin."
+      - alert: SosyalItibarWebhookBacklog
+        expr: sosyal_itibar_queue_oldest_age_seconds{queue="webhook"} > 120
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Webhook ingestion kuyruğu gecikiyor"
+          description: "Worker, Meta erişimi ve webhook retry/dead kayıtlarını kontrol edin."
+      - alert: SosyalItibarAnalysisBacklog
+        expr: sosyal_itibar_queue_oldest_age_seconds{queue="analysis"} > 300
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Yorum analizi kuyruğu gecikiyor"
+          description: "LLM yapılandırmasını, provider limitlerini ve analysis workerını kontrol edin."
+      - alert: SosyalItibarAlertDeliveryBacklog
+        expr: sosyal_itibar_queue_oldest_age_seconds{queue="alert"} > 120
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Kritik alarm teslimatı gecikiyor"
+          description: "Receiver erişimini ve teslimat hata kayıtlarını kontrol edin; kör requeue yapmayın."
+      - alert: SosyalItibarDeadLetter
+        expr: sosyal_itibar_queue_items{status="dead"} > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sosyal İtibar kuyruğunda dead-letter kayıt var"
+          description: "{{ $labels.queue }} kuyruğundaki hatanın nedenini giderdikten sonra kontrollü requeue yapın."
+      - alert: SosyalItibarConnectionRevoked
+        expr: sosyal_itibar_connections{status="revoked"} > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Meta bağlantısı yeniden yetkilendirme gerektiriyor"
+          description: "{{ $labels.platform }} bağlantısını Meta ayarlarından yeniden yetkilendirin."

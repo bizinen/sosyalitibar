@@ -5,6 +5,7 @@ import { db } from "@/lib/db";
 import { monitoringTargets } from "@/db/schema";
 import { isAdmin } from "@/lib/auth";
 import { assertSameOrigin } from "@/lib/security";
+import { invalidateAnalyses, lockAnalysisContext } from "@/lib/analysis-state";
 import { audit } from "@/lib/audit";
 
 const patchSchema = z.object({
@@ -16,14 +17,23 @@ const patchSchema = z.object({
 
 export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }> }) {
   if (!(await isAdmin())) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  if (!assertSameOrigin(req)) return NextResponse.json({ error: "bad_origin" }, { status: 403 });
+  if (!(await assertSameOrigin(req))) return NextResponse.json({ error: "bad_origin" }, { status: 403 });
   const { id } = await ctx.params;
   if (!z.string().uuid().safeParse(id).success) return NextResponse.json({ error: "invalid_id" }, { status: 400 });
   const parsed = patchSchema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) return NextResponse.json({ error: "invalid_body", details: parsed.error.flatten() }, { status: 400 });
   const patch = { ...parsed.data, updatedAt: new Date() } as typeof parsed.data & { updatedAt: Date };
   if (patch.aliases) patch.aliases = [...new Set(patch.aliases.map((x) => x.trim()).filter(Boolean))];
-  const [row] = await db.update(monitoringTargets).set(patch).where(eq(monitoringTargets.id, id)).returning();
+  const row = await db.transaction(async (tx) => {
+    await lockAnalysisContext(tx, true);
+    const before = await tx.query.monitoringTargets.findFirst({ where: eq(monitoringTargets.id, id) });
+    if (!before) return null;
+    const [updated] = await tx.update(monitoringTargets).set(patch).where(eq(monitoringTargets.id, id)).returning();
+    if (updated && (before.name !== updated.name || before.enabled !== updated.enabled || JSON.stringify(before.aliases) !== JSON.stringify(updated.aliases))) {
+      await invalidateAnalyses(tx);
+    }
+    return updated;
+  });
   if (!row) return NextResponse.json({ error: "not_found" }, { status: 404 });
   await audit({ request: req, actor: "admin", action: "target.updated", entityType: "monitoring_target", entityId: id });
   return NextResponse.json(row);
@@ -31,10 +41,15 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
 
 export async function DELETE(req: Request, ctx: { params: Promise<{ id: string }> }) {
   if (!(await isAdmin())) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  if (!assertSameOrigin(req)) return NextResponse.json({ error: "bad_origin" }, { status: 403 });
+  if (!(await assertSameOrigin(req))) return NextResponse.json({ error: "bad_origin" }, { status: 403 });
   const { id } = await ctx.params;
   if (!z.string().uuid().safeParse(id).success) return NextResponse.json({ error: "invalid_id" }, { status: 400 });
-  const [row] = await db.delete(monitoringTargets).where(eq(monitoringTargets.id, id)).returning({ id: monitoringTargets.id, name: monitoringTargets.name });
+  const row = await db.transaction(async (tx) => {
+    await lockAnalysisContext(tx, true);
+    const [deleted] = await tx.delete(monitoringTargets).where(eq(monitoringTargets.id, id)).returning({ id: monitoringTargets.id, name: monitoringTargets.name });
+    if (deleted) await invalidateAnalyses(tx);
+    return deleted;
+  });
   if (!row) return NextResponse.json({ error: "not_found" }, { status: 404 });
   await audit({ request: req, actor: "admin", action: "target.deleted", entityType: "monitoring_target", entityId: id, metadata: { name: row.name } });
   return NextResponse.json({ deleted: true });

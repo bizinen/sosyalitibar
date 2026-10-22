@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { and, eq } from "drizzle-orm";
+import { z } from "zod";
 import { webhookEvents } from "@/db/schema";
 import { db } from "@/lib/db";
 import { isAdmin } from "@/lib/auth";
@@ -8,8 +9,9 @@ import { audit } from "@/lib/audit";
 
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   if (!(await isAdmin())) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  if (!assertSameOrigin(req)) return NextResponse.json({ error: "bad_origin" }, { status: 403 });
+  if (!(await assertSameOrigin(req))) return NextResponse.json({ error: "bad_origin" }, { status: 403 });
   const { id } = await params;
+  if (!z.string().uuid().safeParse(id).success) return NextResponse.json({ error: "invalid_id" }, { status: 400 });
   const [row] = await db.update(webhookEvents).set({
     status: "pending",
     attempts: 0,

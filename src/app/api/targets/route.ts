@@ -5,6 +5,7 @@ import { db } from "@/lib/db";
 import { monitoringTargets } from "@/db/schema";
 import { isAdmin } from "@/lib/auth";
 import { assertSameOrigin } from "@/lib/security";
+import { invalidateAnalyses, lockAnalysisContext } from "@/lib/analysis-state";
 import { audit } from "@/lib/audit";
 
 const createSchema = z.object({
@@ -20,15 +21,20 @@ export async function GET() {
 
 export async function POST(req: Request) {
   if (!(await isAdmin())) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  if (!assertSameOrigin(req)) return NextResponse.json({ error: "bad_origin" }, { status: 403 });
+  if (!(await assertSameOrigin(req))) return NextResponse.json({ error: "bad_origin" }, { status: 403 });
   const parsed = createSchema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) return NextResponse.json({ error: "invalid_body", details: parsed.error.flatten() }, { status: 400 });
   const aliases = [...new Set(parsed.data.aliases.map((x) => x.trim()).filter(Boolean))];
   try {
-    const [row] = await db.insert(monitoringTargets).values({ ...parsed.data, aliases }).returning();
+    const row = await db.transaction(async (tx) => {
+      await lockAnalysisContext(tx, true);
+      const [created] = await tx.insert(monitoringTargets).values({ ...parsed.data, aliases }).returning();
+      await invalidateAnalyses(tx);
+      return created;
+    });
     await audit({ request: req, actor: "admin", action: "target.created", entityType: "monitoring_target", entityId: row?.id, metadata: { name: parsed.data.name } });
     return NextResponse.json(row, { status: 201 });
-  } catch (error) {
-    return NextResponse.json({ error: "target_create_failed", message: error instanceof Error ? error.message : String(error) }, { status: 409 });
+  } catch {
+    return NextResponse.json({ error: "target_create_failed" }, { status: 409 });
   }
 }

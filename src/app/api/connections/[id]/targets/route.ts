@@ -1,20 +1,21 @@
 import { NextResponse } from "next/server";
-import { eq, inArray, sql } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 import { connectionTargets, monitoringTargets, socialConnections, socialItems } from "@/db/schema";
 import { isAdmin } from "@/lib/auth";
 import { audit } from "@/lib/audit";
 import { db } from "@/lib/db";
+import { invalidateAnalyses, lockAnalysisContext } from "@/lib/analysis-state";
 import { assertSameOrigin } from "@/lib/security";
 
 const bodySchema = z.object({
-  targetIds: z.array(z.string().uuid()).max(50).default([]),
-  reanalyzeExisting: z.boolean().default(true),
+  targetIds: z.array(z.string().uuid()).max(50),
+  reanalyzeExisting: z.literal(true).optional(),
 });
 
 export async function PUT(req: Request, ctx: { params: Promise<{ id: string }> }) {
   if (!(await isAdmin())) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  if (!assertSameOrigin(req)) return NextResponse.json({ error: "bad_origin" }, { status: 403 });
+  if (!(await assertSameOrigin(req))) return NextResponse.json({ error: "bad_origin" }, { status: 403 });
 
   const { id } = await ctx.params;
   if (!z.string().uuid().safeParse(id).success) return NextResponse.json({ error: "invalid_connection_id" }, { status: 400 });
@@ -31,6 +32,9 @@ export async function PUT(req: Request, ctx: { params: Promise<{ id: string }> }
   }
 
   const result = await db.transaction(async (tx) => {
+    await lockAnalysisContext(tx, true);
+    const previous = await tx.select({ id: connectionTargets.targetId }).from(connectionTargets).where(eq(connectionTargets.connectionId, id));
+    if (JSON.stringify(previous.map((t) => t.id).sort()) === JSON.stringify([...targetIds].sort())) return { requeued: 0 };
     await tx.delete(connectionTargets).where(eq(connectionTargets.connectionId, id));
     if (targetIds.length > 0) {
       await tx.insert(connectionTargets).values(targetIds.map((targetId) => ({
@@ -40,29 +44,7 @@ export async function PUT(req: Request, ctx: { params: Promise<{ id: string }> }
       })));
     }
 
-    let requeued = 0;
-    if (parsed.data.reanalyzeExisting) {
-      // Undelivered alerts may have been produced using the old target context.
-      await tx.execute(sql`
-        delete from alert_outbox
-        where status <> 'delivered'
-          and item_id in (select id from social_items where connection_id = ${id})
-      `);
-      await tx.execute(sql`
-        delete from social_analyses
-        where item_id in (select id from social_items where connection_id = ${id})
-      `);
-      const rows = await tx.update(socialItems).set({
-        analysisStatus: "pending",
-        analysisAttempts: 0,
-        analysisAvailableAt: new Date(),
-        analysisLockedAt: null,
-        analysisLockId: null,
-        analysisError: null,
-        updatedAt: new Date(),
-      }).where(eq(socialItems.connectionId, id)).returning({ id: socialItems.id });
-      requeued = rows.length;
-    }
+    const requeued = await invalidateAnalyses(tx, eq(socialItems.connectionId, id));
     return { requeued };
   });
 

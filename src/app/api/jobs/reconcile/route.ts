@@ -6,6 +6,6 @@ import { syncAllConnections } from "@/lib/sync";
 export async function POST(req: Request) {
   const auth = req.headers.get("authorization") || "";
   if (!safeEqual(auth, `Bearer ${env().CRON_SECRET}`)) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  const results = await syncAllConnections();
+  const results = await syncAllConnections(undefined, true);
   return NextResponse.json({ results });
 }

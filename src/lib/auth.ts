@@ -38,6 +38,7 @@ export const sessionCookieName = COOKIE;
 export const sessionMaxAgeSeconds = Math.floor(SESSION_TTL_MS / 1000);
 
 function verifyScrypt(password: string, encoded: string): boolean {
+  if (encoded.split("$").length !== 6) return false;
   const [kind, nRaw, rRaw, pRaw, saltB64, expectedB64] = encoded.split("$");
   if (kind !== "scrypt" || !nRaw || !rRaw || !pRaw || !saltB64 || !expectedB64) return false;
   const N = Number(nRaw);
@@ -46,7 +47,10 @@ function verifyScrypt(password: string, encoded: string): boolean {
   if (!Number.isInteger(N) || !Number.isInteger(r) || !Number.isInteger(p) || N < 1024 || r < 1 || p < 1) return false;
   try {
     const expected = Buffer.from(expectedB64, "base64url");
-    const actual = crypto.scryptSync(password, Buffer.from(saltB64, "base64url"), expected.length, { N, r, p });
+    const salt = Buffer.from(saltB64, "base64url");
+    if (!/^[A-Za-z0-9_-]+$/.test(saltB64) || !/^[A-Za-z0-9_-]+$/.test(expectedB64)
+      || salt.length < 16 || expected.length < 32 || expected.length > 64) return false;
+    const actual = crypto.scryptSync(password, salt, expected.length, { N, r, p });
     return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
   } catch {
     return false;

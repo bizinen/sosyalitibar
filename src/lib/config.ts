@@ -11,6 +11,7 @@ const encryptionKeySchema = z.string().min(40).refine((value) => {
 const serverEnvSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   APP_URL: z.string().url(),
+  TRUST_PROXY: z.enum(["true", "false"]).default("false").transform((v) => v === "true"),
   DATABASE_URL: z.string().min(1),
   ADMIN_USERNAME: z.string().min(1).default("admin"),
   ADMIN_PASSWORD_HASH: z.preprocess(blankToUndefined, z.string().min(20).optional()),
@@ -23,7 +24,7 @@ const serverEnvSchema = z.object({
   META_GRAPH_VERSION: z.string().regex(/^v\d+\.\d+$/),
   META_REDIRECT_URI: z.string().url(),
   META_WEBHOOK_VERIFY_TOKEN: z.string().min(16),
-  META_SCOPES: z.string().default("pages_show_list,pages_read_engagement,pages_read_user_content,instagram_basic,instagram_manage_comments"),
+  META_SCOPES: z.string().default("pages_show_list,pages_read_engagement,pages_read_user_content,pages_manage_metadata,instagram_basic,instagram_manage_comments"),
   TOKEN_ENCRYPTION_KEY: encryptionKeySchema,
   TOKEN_ENCRYPTION_KEY_PREVIOUS: z.preprocess(blankToUndefined, encryptionKeySchema.optional()),
   LLM_BASE_URL: z.string().url().default("https://openrouter.ai/api/v1"),
@@ -40,6 +41,10 @@ const serverEnvSchema = z.object({
   SYNC_CONNECTION_BATCH_SIZE: z.coerce.number().int().min(1).max(100).default(6),
   SYNC_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(2),
   SYNC_LEASE_MS: z.coerce.number().int().min(60_000).max(7_200_000).default(1_800_000),
+  SYNC_RUN_BUDGET_MS: z.coerce.number().int().min(10_000).max(600_000).default(120_000),
+  SYNC_RUN_MAX_STEPS: z.coerce.number().int().min(1).max(5000).default(500),
+  SYNC_MAX_RETRIES: z.coerce.number().int().min(1).max(10).default(5),
+  RECONCILE_INTERVAL_MS: z.coerce.number().int().min(60_000).max(2_147_483_647).default(900_000),
   WEBHOOK_BATCH_SIZE: z.coerce.number().int().min(1).max(100).default(25),
   WEBHOOK_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(8),
   ANALYSIS_BATCH_SIZE: z.coerce.number().int().min(1).max(50).default(8),
@@ -99,4 +104,12 @@ export function env() {
 
 export function appOrigin(): string {
   return new URL(env().APP_URL).origin;
+}
+
+export function metaConfigured(cfg = env()): boolean {
+  return /^\d+$/.test(cfg.META_APP_ID) && cfg.META_APP_SECRET !== "local-not-configured";
+}
+
+export function llmConfigured(cfg = env()): boolean {
+  return cfg.LLM_API_KEY !== "local-not-configured" && cfg.LLM_MODEL !== "local-not-configured";
 }

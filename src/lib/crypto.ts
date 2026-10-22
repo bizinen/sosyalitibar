@@ -70,3 +70,7 @@ export function secretNeedsRotation(value: string): boolean {
   const parts = value.split(".");
   return parts[0] !== "v1" || parts[1] !== current.id;
 }
+
+export function currentSecretPrefix(): string {
+  return `v1.${keyring()[0].id}.`;
+}

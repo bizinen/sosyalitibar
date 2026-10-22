@@ -1,111 +1,111 @@
+import Link from "next/link";
 import { redirect } from "next/navigation";
-import { and, desc, eq, gte, ilike, isNull, lt, or, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { socialAnalyses, socialConnections, socialItems } from "@/db/schema";
+import { monitoringTargets, socialAnalyses, socialConnections, socialItems, watchedVideos } from "@/db/schema";
 import { isAdmin } from "@/lib/auth";
 import { AdminNav } from "@/app/components/AdminNav";
-import { ReviewActions } from "@/app/components/ReviewActions";
-import { decodeItemCursor, encodeItemCursor } from "@/lib/cursor";
+import { CommentWorkspace } from "@/app/components/CommentWorkspace";
+import { UiIcon } from "@/app/components/UiIcon";
+import { encodeItemCursor } from "@/lib/cursor";
+import { commentDisplay } from "@/lib/comment-display";
+import { SourceBrowser } from "@/app/components/SourceBrowser";
 
-type Params = { platform?: string; sentiment?: string; category?: string; minSeverity?: string; review?: string; q?: string; cursor?: string };
-
-function riskClass(severity: number) {
-  if (severity >= 70) return "danger";
-  if (severity >= 50) return "warn";
-  if (severity >= 20) return "blue";
-  return "";
-}
+import { commentConditions, commentRows, sourceKey, type CommentParams as Params } from "@/lib/comment-feed";
 
 export default async function Home({ searchParams }: { searchParams: Promise<Params> }) {
   if (!(await isAdmin())) redirect("/login");
-  const p = await searchParams;
-  const conditions: SQL[] = [isNull(socialItems.deletedAt)];
-  if (p.platform === "facebook" || p.platform === "instagram") conditions.push(eq(socialItems.platform, p.platform));
-  if (["positive", "neutral", "negative"].includes(p.sentiment || "")) conditions.push(eq(socialAnalyses.sentiment, p.sentiment!));
-  if (["criticism", "insult", "accusation", "threat", "mockery", "spam", "support", "other"].includes(p.category || "")) conditions.push(eq(socialAnalyses.category, p.category!));
-  const minSeverity = Math.max(0, Math.min(100, Number(p.minSeverity || 0) || 0));
-  if (minSeverity > 0) conditions.push(gte(socialAnalyses.severity, minSeverity));
-  if (["new", "reviewed", "ignored", "escalated"].includes(p.review || "")) conditions.push(eq(socialItems.reviewStatus, p.review!));
-  if (p.q?.trim()) conditions.push(ilike(socialItems.text, `%${p.q.trim().slice(0, 120)}%`));
-  const cursor = decodeItemCursor(p.cursor);
-  if (cursor) {
-    const cursorCondition = or(
-      lt(socialItems.ingestedAt, cursor.at),
-      and(eq(socialItems.ingestedAt, cursor.at), lt(socialItems.id, cursor.id)),
-    );
-    if (cursorCondition) conditions.push(cursorCondition);
+  const p = Object.fromEntries(Object.entries(await searchParams).filter(([, value]) => typeof value === "string")) as Params;
+  if (p.video && !p.source && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(p.video)) {
+    const [video] = await db.select({ platform: watchedVideos.platform, externalId: watchedVideos.externalId }).from(watchedVideos).where(eq(watchedVideos.id, p.video)).limit(1);
+    if (video) p.source = sourceKey(video.platform, video.externalId);
   }
-
+  const showSources = p.mode === "sources" || !(p.mode === "comments" || p.source || p.video || p.view || p.q || p.cursor || p.review || p.needsReview || p.sentiment || p.category || p.minSeverity || p.target || p.analysis || p.from || p.to);
+  const minSeverity = Math.max(0, Math.min(100, Number(p.minSeverity || 0) || 0));
+  const [filtered] = showSources ? [] : await db.select({ total: sql<number>`count(*)::int` }).from(socialItems)
+    .leftJoin(socialAnalyses, eq(socialAnalyses.itemId, socialItems.id)).where(and(...commentConditions({ ...p, cursor: undefined })));
   const [statsRow] = await db.select({
     total: sql<number>`count(*)::int`,
-    negative: sql<number>`count(*) filter (where ${socialAnalyses.sentiment} = 'negative')::int`,
-    critical: sql<number>`count(*) filter (where coalesce(${socialAnalyses.severity}, 0) >= 70)::int`,
+    normal: sql<number>`count(*) filter (where ${socialAnalyses.triageLabel} = 'inceleme_gerekmiyor')::int`,
+    critical: sql<number>`count(*) filter (where coalesce(${socialAnalyses.severity}, 0) >= 70 or ${socialAnalyses.triageLabel} = 'acil_inceleme')::int`,
     needsReview: sql<number>`count(*) filter (where ${socialAnalyses.needsReview} is true and ${socialItems.reviewStatus} = 'new')::int`,
   }).from(socialItems).leftJoin(socialAnalyses, eq(socialAnalyses.itemId, socialItems.id)).where(isNull(socialItems.deletedAt));
 
   const connections = await db.select().from(socialConnections);
-  const rows = await db.select({ item: socialItems, analysis: socialAnalyses, connectionName: socialConnections.displayName })
-    .from(socialItems)
-    .leftJoin(socialAnalyses, eq(socialAnalyses.itemId, socialItems.id))
-    .leftJoin(socialConnections, eq(socialConnections.id, socialItems.connectionId))
-    .where(and(...conditions))
-    .orderBy(desc(socialItems.ingestedAt), desc(socialItems.id))
-    .limit(101);
+  const targets = showSources ? [] : await db.select({ id: monitoringTargets.id, name: monitoringTargets.name }).from(monitoringTargets);
+  const updatesStartedAt = new Date();
+  const [newest] = showSources ? [] : await db.select({ id: socialItems.id, at: socialItems.ingestedAt,
+    preciseAt: sql<string>`to_char(${socialItems.ingestedAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')` })
+    .from(socialItems).orderBy(desc(socialItems.ingestedAt), desc(socialItems.id)).limit(1);
+  const rows = showSources ? [] : await commentRows(p);
   const hasMore = rows.length > 100;
+  const updateCursor = encodeItemCursor(newest ?? { at: updatesStartedAt, id: "00000000-0000-4000-8000-000000000000" });
   const visibleRows = hasMore ? rows.slice(0, 100) : rows;
   const last = visibleRows.at(-1);
-  const nextCursor = hasMore && last ? encodeItemCursor({ at: last.item.ingestedAt, id: last.item.id }) : null;
-  const nextParams = new URLSearchParams();
-  for (const [key, value] of Object.entries(p)) {
-    if (key !== "cursor" && typeof value === "string" && value) nextParams.set(key, value);
-  }
-  if (nextCursor) nextParams.set("cursor", nextCursor);
-  const nextHref = nextCursor ? `/?${nextParams.toString()}` : null;
+  const nextCursor = hasMore && last ? encodeItemCursor({ at: last.item.ingestedAt, id: last.item.id, preciseAt: last.cursorAt }) : null;
 
-  const stats = statsRow || { total: 0, negative: 0, critical: 0, needsReview: 0 };
+  const connectedCount = /^\d{1,4}$/.test(p.connected || "") ? Number(p.connected) : null;
+  const callbackError = p.meta_error === "oauth_denied" ? "Meta bağlantısına izin verilmedi." : p.meta_error === "no_pages" ? "Meta erişilebilir sayfa döndürmedi. Facebook hesabının sayfa erişimini, pages_show_list iznini ve Meta izin ekranındaki hesap seçimini kontrol et." : p.meta_error === "connect_failed" ? "Meta bağlantısı tamamlanamadı. Bağlantı ayarlarından tekrar deneyin." : null;
+  const stats = statsRow || { total: 0, normal: 0, critical: 0, needsReview: 0 };
+  const advancedFilters = Boolean(p.sentiment || p.category || p.review || p.needsReview || p.target || p.analysis || p.from || p.to || minSeverity);
+  const views = [["", "Tüm yorumlar"], ["pending", "İnceleme bekleyen"], ["urgent", "Acil inceleme"], ["normal", "İnceleme gerekmeyen"], ["risk", "Yüksek öncelik"], ["threats", "Eski analiz: tehdit"], ["confirmed", "İnsan onaylı saldırılar"], ["failed", "Analizi başarısız"], ["unavailable", "Kaynağa erişilemiyor"], ["human", "İnsan değerlendirmesi olan"]];
+  function viewHref(view: string) {
+    const params = new URLSearchParams({ mode: "comments" });
+    for (const key of ["source", "sourceQ", "sourceAfter", "video", "q", "platform", "connection", "target", "from", "to"] as const) if (p[key]) params.set(key, p[key]!);
+    if (view) params.set("view", view);
+    return `/?${params}`;
+  }
   return <div className="shell">
     <AdminNav />
-    <main className="container">
-      <div className="page-head">
-        <div><h1>İtibar inceleme kuyruğu</h1><p className="muted" style={{margin:"6px 0 0"}}>Facebook ve Instagram yorumları; LLM sınıflandırması yalnız operasyonel öncelik içindir, otomatik yaptırım uygulanmaz.</p></div>
-        <div className="btn-row"><a className="btn" href="/settings/targets">Hedefleri düzenle</a><a className="btn primary" href="/settings/meta">Meta bağlantıları</a></div>
-      </div>
-
-      <section className="grid-stats">
-        <div className="stat"><div className="stat-label">Toplam yorum</div><div className="stat-value">{stats.total}</div></div>
-        <div className="stat"><div className="stat-label">Negatif</div><div className="stat-value">{stats.negative}</div></div>
-        <div className="stat"><div className="stat-label">70+ risk</div><div className="stat-value">{stats.critical}</div></div>
-        <div className="stat"><div className="stat-label">İnceleme bekleyen</div><div className="stat-value">{stats.needsReview}</div></div>
+    <main className="container comments-workspace">
+      {callbackError ? <div className="notice" role="alert">{callbackError}</div> : connectedCount !== null ? <div className="notice" role="status">Meta bağlantısı tamamlandı: {connectedCount} kaynak.</div> : null}
+      <section className="grid-stats" aria-label="Tüm yorumların özeti">
+        <Link href="/?mode=comments" className="stat"><div className="stat-label"><UiIcon name="comments" size={16} />Toplam yorum</div><div className="stat-value">{stats.total.toLocaleString("tr-TR")}</div><span className="stat-caption">Tüm hesapların</span></Link>
+        <Link href="/?review=new&needsReview=true" className="stat"><div className="stat-label"><UiIcon name="target" size={16} />İnceleme bekleyen</div><div className="stat-value">{stats.needsReview.toLocaleString("tr-TR")}</div><span className="stat-caption">AI insan incelemesi istiyor</span></Link>
+        <Link href="/?view=risk" className="stat risk-stat"><div className="stat-label"><UiIcon name="bell" size={16} />Yüksek öncelik</div><div className="stat-value">{stats.critical.toLocaleString("tr-TR")}</div><span className="stat-caption">Acil etiket veya eski analizde 70+</span></Link>
+        <Link href="/?view=normal" className="stat"><div className="stat-label"><UiIcon name="comments" size={16} />İnceleme gerekmeyen</div><div className="stat-value">{stats.normal.toLocaleString("tr-TR")}</div><span className="stat-caption">AI ön eleme sonucu</span></Link>
       </section>
 
+      <nav className="source-mode-nav" aria-label="İnceleme düzeni"><Link href="/?mode=sources" aria-current={showSources ? "page" : undefined}>Paylaşımlar</Link><Link href="/?mode=comments" aria-current={!showSources ? "page" : undefined}>Tüm yorumlar</Link></nav>
+      {showSources ? <SourceBrowser params={p} connections={connections} /> : <>
+      {p.source ? <SourceBrowser params={p} connections={connections} selected /> : null}
       <section className="panel" style={{marginBottom:18}}>
-        <div className="panel-head"><h2>Filtreler</h2><span className="badge">{connections.length} bağlı kaynak</span></div>
         <div className="panel-body">
-          <form className="filters" method="get">
-            <input className="input" name="q" defaultValue={p.q || ""} placeholder="Yorum içinde ara" />
-            <select className="select" name="platform" defaultValue={p.platform || ""}><option value="">Tüm platformlar</option><option value="instagram">Instagram</option><option value="facebook">Facebook</option></select>
-            <select className="select" name="sentiment" defaultValue={p.sentiment || ""}><option value="">Tüm duygular</option><option value="negative">Negatif</option><option value="neutral">Nötr</option><option value="positive">Pozitif</option></select>
-            <select className="select" name="category" defaultValue={p.category || ""}><option value="">Tüm kategoriler</option><option value="criticism">Eleştiri</option><option value="insult">Hakaret</option><option value="accusation">İddia</option><option value="threat">Tehdit</option><option value="mockery">Alay</option><option value="spam">Spam</option><option value="support">Destek</option><option value="other">Diğer</option></select>
-            <select className="select" name="review" defaultValue={p.review || ""}><option value="">Tüm durumlar</option><option value="new">Yeni</option><option value="reviewed">İncelendi</option><option value="escalated">Yükseltildi</option><option value="ignored">Yok sayıldı</option></select>
-            <input className="input" name="minSeverity" type="number" min="0" max="100" defaultValue={minSeverity || ""} placeholder="Min. risk" />
-            <button className="btn primary" type="submit">Uygula</button><a className="btn" href="/">Temizle</a>
+          <form className="comment-filters" method="get">
+            <input type="hidden" name="mode" value="comments" />
+            {["source", "sourceQ", "sourceAfter", "video"].map((key) => p[key as keyof Params] ? <input key={key} type="hidden" name={key} value={p[key as keyof Params]} /> : null)}
+            {p.view ? <input type="hidden" name="view" value={p.view} /> : null}
+            <div className="filter-bar">
+            <input className="input search-input" name="q" aria-label="Yorum içinde ara" defaultValue={p.q || ""} placeholder="Bir kelime, isim veya ifade ara…" />
+            <select className="select" name="platform" aria-label="Platform" defaultValue={p.platform || ""}><option value="">Tüm platformlar</option><option value="instagram">Instagram</option><option value="facebook">Facebook</option><option value="youtube">YouTube</option></select>
+            <select className="select" name="connection" aria-label="Hesap" defaultValue={p.connection || ""}><option value="">Tüm hesaplar</option>{connections.map((connection) => <option key={connection.id} value={connection.id}>{connection.displayName}</option>)}</select>
+            <button className="btn primary" type="submit">Göster</button>
+            </div>
+            <details className="advanced-filters" open={advancedFilters}><summary>Detaylı filtreler{advancedFilters ? <span className="badge blue">Filtre seçili</span> : null}</summary><div className="filters">
+            <select className="select" name="sentiment" aria-label="Yorumun tonu" defaultValue={p.sentiment || ""}><option value="">Eski analiz: tüm tonlar</option><option value="negative">Olumsuz</option><option value="neutral">Nötr</option><option value="positive">Olumlu</option></select>
+            <select className="select" name="category" aria-label="Yorum kategorisi" defaultValue={p.category || ""}><option value="">Eski analiz: tüm kategoriler</option><option value="criticism">Eleştiri</option><option value="insult">Hakaret</option><option value="accusation">İddia</option><option value="threat">Tehdit</option><option value="mockery">Alay</option><option value="spam">Spam</option><option value="support">Destek</option><option value="other">Diğer</option></select>
+            <select className="select" name="review" aria-label="İnceleme durumu" defaultValue={p.review || ""}><option value="">Tüm inceleme durumları</option><option value="new">Yeni</option><option value="reviewed">İncelendi</option><option value="escalated">Önceliklendirildi</option><option value="ignored">Dikkate alınmadı</option></select>
+            <select className="select" name="needsReview" aria-label="LLM inceleme gereksinimi" defaultValue={p.needsReview || ""}><option value="">Tüm inceleme kararları</option><option value="true">LLM insan incelemesi istiyor</option></select>
+            <select className="select" name="target" aria-label="Hedef" defaultValue={p.target || ""}><option value="">Tüm hedefler</option>{targets.map((target) => <option key={target.id} value={target.name}>{target.name}</option>)}</select>
+            <select className="select" name="analysis" aria-label="Analiz durumu" defaultValue={p.analysis || ""}><option value="">Tüm analiz durumları</option><option value="pending">Analiz bekliyor</option><option value="processing">Analiz ediliyor</option><option value="retry">Tekrar denenecek</option><option value="complete">Analiz tamamlandı</option><option value="dead">Analiz tamamlanamadı</option></select>
+            <label className="small muted">Alınma başlangıcı (UTC)<input className="input" name="from" type="date" defaultValue={p.from || ""} /></label>
+            <label className="small muted">Alınma bitişi (UTC)<input className="input" name="to" type="date" defaultValue={p.to || ""} /></label>
+            <input className="input" name="minSeverity" aria-label="En düşük öncelik puanı" type="number" min="0" max="100" defaultValue={minSeverity || ""} placeholder="Eski analiz: en düşük puan" />
+            </div></details><div className="filter-footer"><span>Son alınan yorumlar önce gösterilir.</span><Link className="text-link" href={p.source ? `/?mode=comments&source=${encodeURIComponent(p.source)}` : "/?mode=comments"}>Yorum filtrelerini temizle</Link></div>
           </form>
         </div>
       </section>
 
-      <section className="panel">
-        <div className="panel-head"><h2>Son kayıtlar</h2><span className="badge">{visibleRows.length} kayıt</span></div>
-        {visibleRows.length === 0 ? <div className="empty">Filtreye uygun kayıt yok.</div> : <div className="table-wrap"><table>
-          <thead><tr><th>Kaynak / yazar</th><th>Yorum</th><th>LLM değerlendirme</th><th>İnceleme</th></tr></thead>
-          <tbody>{visibleRows.map(({ item, analysis, connectionName }) => <tr key={item.id}>
-            <td style={{minWidth:180}}><div><strong>{connectionName || item.platform}</strong></div><div className="small muted">{item.authorName || "Bilinmeyen kullanıcı"}</div><div className="small muted">{item.sourceCreatedAt?.toLocaleString("tr-TR") || item.ingestedAt.toLocaleString("tr-TR")}</div></td>
-            <td><div className="meta-line"><span className="badge blue">{item.platform}</span><span className="badge">{item.itemType}</span><span className="badge">{item.reviewStatus}</span></div><div className="comment-text">{item.text || <em>Metin yok</em>}</div>{item.permalink ? <div style={{marginTop:8}}><a className="small" href={item.permalink} target="_blank" rel="noreferrer">Kaynağı aç ↗</a></div> : null}</td>
-            <td style={{minWidth:260}}>{analysis ? <><div className="meta-line"><span className={`badge ${riskClass(analysis.severity)}`}>risk {analysis.severity}</span><span className={`badge ${analysis.sentiment === "negative" ? "danger" : analysis.sentiment === "positive" ? "ok" : ""}`}>{analysis.sentiment}</span><span className="badge">{analysis.category}</span></div>{analysis.matchedTarget ? <div className="small"><strong>Hedef:</strong> {analysis.matchedTarget}</div> : null}<div className="summary">{analysis.summary}</div>{analysis.containsClaim && analysis.claimText ? <div className="summary"><strong>İddia:</strong> {analysis.claimText}</div> : null}</> : <span className={`badge ${item.analysisStatus === "dead" ? "danger" : "warn"}`}>{item.analysisStatus}</span>}</td>
-            <td style={{minWidth:220}}><ReviewActions itemId={item.id} current={item.reviewStatus} /></td>
-          </tr>)}</tbody>
-        </table></div>}
-        {nextHref ? <div className="panel-body" style={{display:"flex",justifyContent:"center",borderTop:"1px solid var(--line)"}}><a className="btn" href={nextHref}>Daha eski 100 kaydı göster</a></div> : null}
+      <section className="comment-feed">
+        <div className="feed-head"><div><h2>{p.source ? "Bu paylaşımın yorumları" : "Tüm yorumlar"}</h2><p className="section-description">{p.source ? "Seçilen paylaşıma ait yorumlar ve yanıtlar." : "Bütün kaynaklardan alınan yorumlar."}</p></div><span className="badge">{filtered?.total ?? 0} yorum</span></div>
+        <nav className="review-views" aria-label="Hazır inceleme görünümleri">{views.map(([value, label]) => <Link key={value} href={viewHref(value)} className={value === (p.view ?? "") ? "is-active" : ""} aria-current={value === (p.view ?? "") ? "page" : undefined}>{label}</Link>)}</nav>
+        {visibleRows.length === 0 ? <div className="empty empty-feature"><span className="empty-symbol"><UiIcon name="comments" size={30} /></span><h2>{p.source || p.video ? "Bu paylaşım için yorum bulunamadı." : "Bu görünümde yorum bulunamadı."}</h2><p>Seçili filtreler alınan yorumları gizleyebilir. Henüz yorum alınmadıysa izleme listesindeki tarama durumunu kontrol edebilirsin.</p><div className="btn-row"><Link className="btn primary" href={p.source ? `/?mode=comments&source=${encodeURIComponent(p.source)}` : "/?mode=comments"}>Yorum filtrelerini temizle</Link><Link className="btn" href="/settings/videos">İzleme listesi</Link></div></div> : null}
+        <CommentWorkspace key={JSON.stringify([p.source, p.video, p.view, p.q, p.platform, p.connection, p.target, p.from, p.to, p.cursor, p.review, p.category, p.analysis, p.needsReview, p.minSeverity, p.sentiment])} rows={visibleRows.map(({ item, analysis, connectionName, parentText }) => ({ item: { ...item,
+          raw: commentDisplay(item.raw) },
+          analysis: analysis ? { ...analysis, raw: null } : null, connectionName, parentText }))} updateCursor={updateCursor}
+          nextCursor={nextCursor} filters={Object.fromEntries(Object.entries(p).filter(([, value]) => typeof value === "string"))} total={filtered?.total ?? 0} />
       </section>
+      </>}
     </main>
   </div>;
 }

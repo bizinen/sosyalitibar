@@ -3,11 +3,16 @@ import { asc } from "drizzle-orm";
 import { isAdmin } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { connectionTargets, monitoringTargets, socialConnections } from "@/db/schema";
-import { env } from "@/lib/config";
+import { metaConfigured, llmConfigured } from "@/lib/config";
+import { getMetaSettings } from "@/lib/meta-settings";
+import { MetaSettingsForm } from "@/app/components/MetaSettingsForm";
+import { getLlmSettings } from "@/lib/llm-settings";
+import { SetupLink } from "@/app/components/SetupLink";
 import { AdminNav } from "@/app/components/AdminNav";
 import { OperationsActions } from "@/app/components/OperationsActions";
-import { ConnectionTargetManager } from "@/app/components/ConnectionTargetManager";
-import { ConnectionActions } from "@/app/components/ConnectionActions";
+import { AccountList } from "@/app/components/AccountList";
+import { UiIcon } from "@/app/components/UiIcon";
+import Link from "next/link";
 
 export default async function MetaSettingsPage() {
   if (!(await isAdmin())) redirect("/login");
@@ -18,24 +23,20 @@ export default async function MetaSettingsPage() {
   ]);
   const mappingByConnection = new Map<string, string[]>();
   for (const row of mappings) mappingByConnection.set(row.connectionId, [...(mappingByConnection.get(row.connectionId) ?? []), row.targetId]);
-  const cfg = env();
+  const cfg = await getLlmSettings();
+  const metaCfg = await getMetaSettings();
+  const metaReady = metaConfigured(metaCfg) && metaCfg.metaPublicOrigin.startsWith("https://");
+  const enabledTargetIds = new Set(targets.filter((target) => target.enabled).map((target) => target.id));
+  const unmapped = connections.filter((connection) => connection.status !== "disabled"
+    && !(mappingByConnection.get(connection.id) ?? []).some((targetId) => enabledTargetIds.has(targetId)));
   return <div className="shell"><AdminNav /><main className="container">
-    <div className="page-head"><div><h1>Meta bağlantıları</h1><p className="muted" style={{margin:"6px 0 0"}}>Facebook Page ve bağlı Instagram Professional hesaplarının token, scope, webhook ve reconciliation durumu.</p></div><OperationsActions /></div>
-    <section className="panel" style={{marginBottom:18}}><div className="panel-head"><h2>Uygulama yapılandırması</h2></div><div className="panel-body two-col">
-      <div><div className="small muted">Meta App ID</div><div className="code">••••{cfg.META_APP_ID.slice(-6)}</div></div>
-      <div><div className="small muted">Graph sürümü</div><div className="code">{cfg.META_GRAPH_VERSION}</div></div>
-      <div><div className="small muted">Webhook callback</div><div className="code">{new URL("/api/webhooks/meta", cfg.APP_URL).toString()}</div></div>
-      <div><div className="small muted">İstenen scope'lar</div><div className="small">{cfg.META_SCOPES.split(",").join(" · ")}</div></div>
-    </div></section>
-    <section className="panel"><div className="panel-head"><h2>Bağlı kaynaklar</h2><span className="badge">{connections.length}</span></div>
-      {connections.length === 0 ? <div className="empty">Henüz kaynak bağlı değil. “Meta hesabı bağla” ile başlayın.</div> : <div className="table-wrap"><table><thead><tr><th>Kaynak</th><th>Sağlık</th><th>Scope</th><th>Webhook / Sync</th><th>İşlem</th></tr></thead><tbody>
-        {connections.map((c) => <tr key={c.id}><td><strong>{c.displayName}</strong><div className="small muted">{c.platform}{c.username ? ` · @${c.username}` : ""}</div><div className="small muted code">{c.externalAccountId}</div></td><td><span className={`badge ${c.status === "active" ? "ok" : c.status === "revoked" ? "danger" : "warn"}`}>{c.status}</span>{c.lastError ? <div className="small muted" style={{marginTop:6,maxWidth:360}}>{c.lastError}</div> : null}<div className="small muted">Kontrol: {c.healthCheckedAt?.toLocaleString("tr-TR") || "—"}</div>{c.tokenExpiresAt ? <div className="small muted">Token: {c.tokenExpiresAt.toLocaleString("tr-TR")}</div> : null}</td><td><div className="small" style={{maxWidth:420}}>{c.grantedScopes.length ? c.grantedScopes.join(" · ") : "Scope henüz doğrulanmadı"}</div></td><td><div><span className={`badge ${c.platform === "facebook" && c.webhookSubscribed ? "ok" : ""}`}>{c.platform === "facebook" ? (c.webhookSubscribed ? "Page webhook bağlı" : "Page webhook kontrol et") : "IG webhook App Dashboard"}</span></div><div className="small muted" style={{marginTop:6}}>Son sync: {c.lastSyncedAt?.toLocaleString("tr-TR") || "—"}</div><div className="small muted">Son deneme: {c.syncAttemptedAt?.toLocaleString("tr-TR") || "—"}</div></td><td><ConnectionActions id={c.id} status={c.status} displayName={c.displayName} /></td></tr>)}
-      </tbody></table></div>}
-    </section>
-    <ConnectionTargetManager
-      connections={connections.map((c) => ({ id: c.id, platform: c.platform, displayName: c.displayName, username: c.username, targetIds: mappingByConnection.get(c.id) ?? [] }))}
-      targets={targets}
-    />
-    <div className="notice" style={{marginTop:18}}>Instagram yorum webhook alanını Meta Developer Dashboard → Webhooks → Instagram altında <strong>comments</strong> için bu callback'e bağlayın. Facebook Page tarafında uygulama <span className="code">feed</span> alanına programatik olarak abone olmaya çalışır. Reconciliation senkronu webhook kaçırmalarına karşı güvenlik ağıdır.</div>
+    <div className="page-head"><div><h1>Hesaplarım</h1><p className="muted" style={{margin:"6px 0 0"}}>Bağlantıları ve hesap sahipliğini yönet.</p></div><OperationsActions /></div>
+    {!metaReady ? <div className="notice" role="alert">Meta bağlantısı henüz yapılandırılmadı. Gerçek App ID ve App Secret ayarlandıktan sonra hesap bağlanabilir.</div> : null}
+    {!llmConfigured(cfg) ? <div className="notice" role="alert">AI modeli henüz ayarlanmadı. Yorumlar korunur ve analiz için bekler. <Link className="text-link" href="/settings/llm">AI ayarlarını gör</Link></div> : null}
+    {unmapped.length ? <div className="notice" role="alert">{unmapped.length} hesabın sahibi henüz belirtilmedi. “Sen/siz” gibi isim içermeyen yorumların kime yöneldiğini anlayabilmek için hesap kartından kişi veya kurum seç.</div> : null}
+    <section className="connect-panel" id="connect"><div><h2>Hesap ekle</h2><p>Facebook sayfalarını ve bağlı Instagram Professional hesaplarını Meta üzerinden bağla.</p></div>{metaReady ? <a className="btn primary" href={new URL("/api/meta/connect", metaCfg.metaPublicOrigin).toString()}><UiIcon name="plus" size={17} />Meta ile hesap bağla</a> : <SetupLink />}</section>
+    <AccountList accounts={connections.map((c) => ({ id: c.id, platform: c.platform, displayName: c.displayName, username: c.username, status: c.status, lastError: c.lastError, externalAccountId: c.externalAccountId, grantedScopes: c.grantedScopes, webhookSubscribed: c.webhookSubscribed, lastSyncedAt: c.lastSyncedAt?.toISOString() ?? null, healthCheckedAt: c.healthCheckedAt?.toISOString() ?? null, tokenExpiresAt: c.tokenExpiresAt?.toISOString() ?? null, targetIds: mappingByConnection.get(c.id) ?? [] }))} targets={targets} />
+    <details className="settings-disclosure" id="connection-setup" open={!metaReady}><summary>Meta uygulaması ve bağlantı kurulumu</summary><MetaSettingsForm loginConfigId={metaCfg.metaLoginConfigId} appId={/^\d+$/.test(metaCfg.META_APP_ID) ? metaCfg.META_APP_ID : ""} publicOrigin={metaCfg.metaPublicOrigin} graphVersion={metaCfg.META_GRAPH_VERSION} hasSecret={metaCfg.META_APP_SECRET !== "local-not-configured" && metaCfg.META_APP_SECRET.length >= 16} hasVerifyToken={metaCfg.META_WEBHOOK_VERIFY_TOKEN.length >= 16} revision={metaCfg.metaSettingsRevision} scopes={metaCfg.META_SCOPES.split(",")} /></details>
+    <p className="small muted">Birden fazla dilde kullandığın hesapları aynı kişi veya kurumla eşleştirebilirsin. <Link className="text-link" href="/settings/targets">Kişileri ve kurumları yönet</Link> · <Link className="text-link" href="/settings/llm">AI ayarlarını gör</Link></p>
   </main></div>;
 }

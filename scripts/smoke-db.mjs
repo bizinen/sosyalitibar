@@ -22,6 +22,12 @@ try {
     "alert_outbox",
     "auth_rate_limits",
     "audit_logs",
+    "llm_settings",
+    "meta_settings",
+    "alert_settings",
+    "worker_heartbeats",
+    "item_review_events",
+    "item_translations",
   ];
 
   const tables = await sql`
@@ -33,7 +39,12 @@ try {
   for (const table of expectedTables) assert(tableNames.has(table), `eksik tablo: ${table}`);
 
   const migrations = await sql`select name from _app_migrations order by name`;
-  assert(migrations.length >= 6, `beklenen migration sayısı >= 6, bulunan ${migrations.length}`);
+  assert(migrations.length >= 19, `beklenen migration sayısı >= 19, bulunan ${migrations.length}`);
+
+  const columns = await sql`select table_name, column_name from information_schema.columns
+    where table_schema = 'public' and (table_name, column_name) in
+    (('social_items', 'analysis_revision'), ('social_items', 'source_read_version'), ('social_items', 'source_checked_at'), ('social_items', 'source_unavailable_at'), ('alert_outbox', 'analysis_revision'), ('alert_outbox', 'dispatch_started_at'), ('alert_outbox', 'receiver_key'))`;
+  assert(columns.length === 7, "source availability/read/analysis revision/dispatch/receiver columns eksik");
 
   const [fk] = await sql`
     select rc.delete_rule
@@ -59,15 +70,19 @@ try {
     where schemaname = 'public'
       and indexname in (
         'social_items_text_trgm_idx',
+        'social_items_parent_idx',
         'social_items_ingested_id_idx',
         'social_items_analysis_queue_idx',
         'webhook_events_queue_received_idx',
         'alert_outbox_queue_created_idx',
         'social_connections_sync_attempt_idx',
-        'social_connections_sync_claim_idx'
+        'social_connections_sync_claim_idx',
+        'social_items_source_check_idx',
+        'item_review_events_item_idx',
+        'item_translations_revision_uidx'
       )
   `;
-  assert(indexes.length === 7, `beklenen kritik index sayısı 7, bulunan ${indexes.length}`);
+  assert(indexes.length === 11, `beklenen kritik index sayısı 11, bulunan ${indexes.length}`);
 
   const [connectionTargetsUnique] = await sql`
     select count(*)::int as count
