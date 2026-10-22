@@ -127,6 +127,8 @@ export const watchedVideos = pgTable("watched_videos", {
   lastRunCount: integer("last_run_count"),
   title: text("title"),
   channelName: text("channel_name"),
+  profileImageUrl: text("profile_image_url"),
+  metadataCheckedAt: timestamp("metadata_checked_at", { withTimezone: true }),
   status: text("status").notNull().default("active"),
   revision: integer("revision").notNull().default(1),
   attempts: integer("attempts").notNull().default(0),

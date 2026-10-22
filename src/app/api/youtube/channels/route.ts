@@ -8,7 +8,7 @@ import { assertSameOrigin } from "@/lib/security";
 import { decryptSecret } from "@/lib/crypto";
 import { getYouTubeSettings } from "@/lib/youtube-settings";
 import { readResponseBody } from "@/lib/http-body";
-import { youtubeChannelReference } from "@/lib/video-source";
+import { youtubeChannelReference, youtubeProfileImage } from "@/lib/video-source";
 import { youtubeGet } from "@/lib/watched-videos";
 
 export async function POST(req: Request) {
@@ -26,7 +26,7 @@ export async function POST(req: Request) {
   if (!encrypted) return NextResponse.json({ error: "youtube_key_required" }, { status: 400 });
   try {
     const result = z.object({ items: z.array(z.object({ id: z.string().regex(/^UC[A-Za-z0-9_-]{22}$/),
-      snippet: z.object({ title: z.string().max(500) }), contentDetails: z.object({ relatedPlaylists: z.object({ uploads: z.string().min(1).max(256) }) }),
+      snippet: z.object({ title: z.string().max(500), thumbnails: z.unknown().optional() }), contentDetails: z.object({ relatedPlaylists: z.object({ uploads: z.string().min(1).max(256) }) }),
     })).max(1) }).parse(await youtubeGet("channels", decryptSecret(encrypted), { part: "snippet,contentDetails", ...reference }));
     const channel = result.items[0];
     if (!channel || (reference.id && channel.id !== reference.id)) return NextResponse.json({ error: "channel_unavailable" }, { status: 404 });
@@ -37,6 +37,7 @@ export async function POST(req: Request) {
       const fields = { platform: "youtube", sourceKind: "channel", externalId: channel.id, url: `https://www.youtube.com/channel/${channel.id}`,
         uploadsPlaylistId: channel.contentDetails.relatedPlaylists.uploads, apiKeyEncrypted: null, title: channel.snippet.title,
         channelName: channel.snippet.title, analysisAfter: existing?.analysisAfter ?? new Date(), status: "active", attempts: 0,
+        profileImageUrl: youtubeProfileImage(channel.snippet.thumbnails), metadataCheckedAt: new Date(),
         lastError: null, lockId: null, lockedAt: null, progressEncrypted: null, availableAt: new Date(), updatedAt: new Date() };
       const [row] = existing ? await tx.update(watchedVideos).set({ ...fields, revision: existing.revision + 1 }).where(eq(watchedVideos.id, existing.id)).returning({ id: watchedVideos.id })
         : await tx.insert(watchedVideos).values(fields).returning({ id: watchedVideos.id });

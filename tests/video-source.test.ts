@@ -1,5 +1,16 @@
 import { expect, it } from "vitest";
-import { videoSource, youtubeChannelReference } from "@/lib/video-source";
+import { videoSource, youtubeChannelReference, youtubeProfileImage } from "@/lib/video-source";
+
+it("uses an official HTTPS channel image exactly as returned, with safe fallbacks", () => {
+  const url = "https://yt3.ggpht.com/channel=s240-c-k";
+  expect(youtubeProfileImage({ medium: { url }, default: { url: "https://yt3.googleusercontent.com/s88" } })).toBe(url);
+  expect(youtubeProfileImage({ medium: { url: "https://evil.test/avatar" }, default: { url } })).toBe(url);
+  for (const unsafe of ["http://yt3.ggpht.com/a", "https://yt3.ggpht.com.evil.test/a", "https://user:secret@yt3.ggpht.com/a", "https://yt3.ggpht.com:8443/a", "data:image/png;base64,AA"]) {
+    expect(youtubeProfileImage({ medium: { url: unsafe } })).toBeNull();
+  }
+  expect(youtubeProfileImage(undefined)).toBeNull();
+  expect(youtubeProfileImage({})).toBeNull();
+});
 
 it.each(["https://www.youtube.com/@kanal", "https://youtube.com/@kanal/videos", "https://youtube.com/@kanal/shorts"])("resolves channel handles without search scraping: %s", url => {
   expect(youtubeChannelReference(url)).toEqual({ forHandle: "@kanal" });
