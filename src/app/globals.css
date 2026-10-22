@@ -616,6 +616,55 @@ button.badge { min-height: 36px; border: 1px solid var(--line); }
 .account-remove-confirm strong { display: block; overflow-wrap: anywhere; }
 .account-action-error { color: var(--danger); margin-top: 10px; }
 .account-lifecycle-note { border-top: 1px solid var(--line); padding-top: 18px; line-height: 1.7; }
+.integration-list { border: 1px solid var(--line); border-radius: 14px; background: #fff; overflow: hidden; }
+.integration-row { display: flex; align-items: flex-start; gap: 18px; padding: 28px; }
+.integration-row + .integration-row { border-top: 1px solid var(--line); }
+.integration-symbol { display: grid; place-items: center; flex-shrink: 0; width: 48px; height: 48px; background: #f3f5f8; color: #536178; border-radius: 12px; }
+.integration-identity { flex: 1; min-width: 0; }
+.integration-identity h2 { font-size: 17px; margin: 1px 0 5px; }
+.integration-identity p { margin: 0; line-height: 1.6; }
+.integration-identity .integration-detail { margin-top: 14px; color: #536178; font-size: 13px; max-width: 55ch; }
+.integration-controls { display: grid; justify-items: end; gap: 18px; flex-shrink: 0; }
+.integration-status { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: #536178; }
+.integration-controls .btn { font-size: 12px; }
+.integration-controls .btn svg { transition: transform 180ms ease; }
+.integration-controls .btn:hover svg { transform: rotate(-10deg); }
+.integration-next { display: flex; align-items: center; gap: 16px; padding: 24px 4px; }
+.integration-next > svg { color: var(--muted); flex-shrink: 0; }
+.integration-next > div { flex: 1; }
+.integration-next strong { font-size: 14px; font-weight: 600; }
+.integration-next p { margin: 6px 0 0; line-height: 1.6; }
+.integration-footnote { display: flex; align-items: center; gap: 7px; border-top: 1px solid var(--line); padding-top: 18px; line-height: 1.6; }
+.integration-footnote svg { flex-shrink: 0; }
+.integration-dialog { width: min(720px,calc(100vw - 32px)); }
+.integration-dialog[open] { animation: integration-open 160ms ease-out; }
+.integration-dialog .account-add-heading { padding-bottom: 18px; border-bottom: 1px solid var(--line); }
+.integration-dialog .account-add-heading p { margin: 8px 0 0; line-height: 1.6; }
+.integration-form { padding-top: 18px; }
+.integration-form > p:first-child { margin: 0 0 20px; line-height: 1.7; }
+.integration-form .llm-fields { grid-template-columns: 1fr; }
+.meta-setup.integration-form .llm-fields { grid-template-columns: 1fr 1fr; }
+.integration-form .llm-fields > button[type="submit"] { margin-top: 4px; }
+.integration-help { border-top: 1px solid var(--line); margin-top: 20px; padding-top: 16px; }
+.integration-help > summary { cursor: pointer; font-size: 13px; font-weight: 600; color: #536178; padding: 4px 0; }
+.integration-help[open] > summary { margin-bottom: 16px; }
+.integration-help p,.integration-help li { line-height: 1.75; }
+.integration-advanced { grid-column: 1/-1; margin-top: 0; }
+.integration-discard { padding: 24px 0 4px; }
+.integration-discard p { line-height: 1.6; }
+@keyframes integration-open { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+@media (max-width: 650px) {
+  .integration-row { padding: 20px; gap: 12px; flex-wrap: wrap; }
+  .integration-symbol { width: 40px; height: 40px; }
+  .integration-identity { flex-basis: calc(100% - 52px); }
+  .integration-controls { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 6px; }
+  .integration-status { font-size: 11px; }
+  .integration-next { flex-wrap: wrap; }
+  .integration-next > .btn { margin-left: 36px; }
+  .integration-dialog .meta-copy-row { flex-wrap: wrap; }
+  .integration-dialog .meta-copy-row .input { flex-basis: 100%; }
+  .meta-setup.integration-form .llm-fields { grid-template-columns: 1fr; }
+}
 @media (max-width: 650px) {
   .accounts-command { flex-direction: column; align-items: stretch; }
   .accounts-command .btn-row { flex-wrap: wrap; }

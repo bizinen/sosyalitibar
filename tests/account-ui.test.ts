@@ -6,6 +6,22 @@ vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: vi.fn() }) }));
 import { ConnectionActions } from "@/app/components/ConnectionActions";
 import { AccountsWorkspace } from "@/app/components/AccountsWorkspace";
 import { YouTubeChannels } from "@/app/components/YouTubeChannels";
+import { IntegrationsWorkspace } from "@/app/components/IntegrationsWorkspace";
+
+it("keeps provider credential forms unmounted until requested and distinguishes saved setup from missing setup", () => {
+  const meta = { appId: "123", loginConfigId: "", publicOrigin: "https://panel.example.test", graphVersion: "v26.0", hasSecret: true, hasVerifyToken: true, revision: 1, scopes: [] };
+  const render = (hasKey: boolean, hasSecret: boolean) => renderToStaticMarkup(createElement(IntegrationsWorkspace, { meta: { ...meta, hasSecret }, youtube: { hasKey, revision: 1 } }));
+  const configured = render(true, true);
+  expect(configured).toContain("API anahtarı kayıtlı");
+  expect(configured).toContain("Uygulama bilgileri kayıtlı");
+  expect(configured).not.toContain('type="password"');
+  expect(configured).not.toContain("https://panel.example.test");
+  expect(configured.match(/<dialog[^>]*>/)?.[0]).not.toMatch(/\sopen(?:\s|=|>)/);
+  const missing = render(false, false);
+  expect(missing.match(/Kurulum gerekli/g)).toHaveLength(2);
+  expect(missing).not.toContain("API anahtarı kayıtlı");
+  expect(missing).not.toContain("Uygulama bilgileri kayıtlı");
+});
 
 it("opens account creation only on request and keeps credential fields out of the accounts page", () => {
   const html = renderToStaticMarkup(createElement(AccountsWorkspace, { accounts: [], channels: [], targets: [], metaConnectUrl: null, hasYouTubeKey: true, checkedAt: 0 }));
