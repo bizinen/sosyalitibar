@@ -5,10 +5,11 @@ import { useEffect, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { UiIcon } from "@/app/components/UiIcon";
 import type { VideoPlatform } from "@/lib/video-source";
+import { sourceScanStatus } from "@/lib/source-scan";
 
 type Video = { id: string; platform: string; url: string; title: string | null; channelName: string | null;
   provider: string; resultsLimit: number; pollMinutes: number; maxChargeCents: number; lastRunId: string | null; lastRunCount: number | null;
-  status: string; revision: number; lastError: string | null; lastSyncedAt: string | null; lockedAt: string | null; continuing: boolean; count: number };
+  status: string; revision: number; lastError: string | null; lastSyncedAt: string | null; lockedAt: string | null; continuing: boolean; overdue: boolean; count: number };
 const platforms = { youtube: "YouTube", instagram: "Instagram", facebook: "Facebook" };
 const errors: Record<string, string> = { invalid_video_url: "Seçili platforma ait bir video veya paylaşım bağlantısı gir.",
   source_identity_mismatch: "Paylaşım bağlantısı ve girilen API kimliği farklı içeriklere ait. Kimliği kontrol et.",
@@ -26,6 +27,8 @@ function sourceError(code: string) {
   if (code === "video_unavailable") return "Video API üzerinden erişilebilir değil.";
   if (code === "source_identity_mismatch") return "Paylaşım bağlantısı ve API medya kimliği eşleşmiyor. Bağlantıyı ve kimliği düzeltip yeniden ekle.";
   if (code === "youtube_quota_exceeded") return "YouTube API kotası doldu. Sistem daha sonra tekrar deneyecek.";
+  if (code === "source_pagination_stalled") return "Sağlayıcı aynı yorum sayfalarına dönüyor. Sonsuz tekrar önlendi; kaynak müdahale bekliyor.";
+  if (code === "source_pagination_limit") return "Tarama güvenli sayfa bütçesine ulaştı. Kapsam tamamlanmadı; kaynak müdahale bekliyor.";
   if (code.startsWith("meta_http_")) return "Meta bu paylaşımı okumaya izin vermedi veya paylaşım erişilebilir değil. Seçili hesabın yetkisini ve paylaşım kimliğini kontrol et.";
   if (code.startsWith("youtube_http_")) return "YouTube isteği başarısız. API anahtarını, API etkinliğini ve video erişimini kontrol et.";
   return errors[code] ?? "Yorumlar alınamadı. Kaynak bağlantısını kontrol edip tekrar dene.";
@@ -79,6 +82,21 @@ export function WatchedVideos({ videos, connections, hasYouTubeKey, hasApifyKey,
     } catch (cause) { setError(cause instanceof Error ? cause.message : "İşlem yapılamadı."); }
     finally { setBusy(null); }
   }
+  async function configure(video: Video, event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    setBusy(video.id); setError(""); setMessage("");
+    try {
+      const response = await fetch(`/api/videos/${video.id}`, { method: "PATCH", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "configure", revision: video.revision, settings: {
+          resultsLimit: Number(form.get("resultsLimit")), pollMinutes: Number(form.get("pollMinutes")), maxChargeCents: Math.round(Number(form.get("charge")) * 100),
+        } }) });
+      const body = await response.json();
+      if (!response.ok) throw new Error(errors[body.error] ?? "Tarama ayarları kaydedilemedi.");
+      setMessage("Sonraki taramanın limitleri güncellendi. Alınan yorumlar korundu; yeni tarama başlatılmadı."); router.refresh();
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Tarama ayarları kaydedilemedi."); }
+    finally { setBusy(null); }
+  }
   return <>
     <section className="panel"><div className="panel-head"><h2>Video veya paylaşım ekle</h2><UiIcon name="plus" /></div>
       <form className="panel-body" onSubmit={add}><fieldset className="llm-fields" disabled={busy !== null}>
@@ -111,14 +129,23 @@ export function WatchedVideos({ videos, connections, hasYouTubeKey, hasApifyKey,
     <div className="feed-head"><h2>İzleme listesi <span className="badge">{videos.length}</span></h2><button className="btn" disabled={busy !== null} onClick={() => router.refresh()}>Yenile</button></div>
     {videos.length === 0 ? <section className="panel empty"><UiIcon name="comments" size={28} /><h2>İlk videoyu ekle.</h2><p>Video bağlantısını gir; alınan yorumlar mevcut inceleme ekranında görünsün.</p></section> : <div className="watched-video-grid">{videos.map((video) => {
       const running = video.lockedAt && Math.max(now, checkedAt) - Date.parse(video.lockedAt) < 180000;
-      const status = video.status === "paused" ? "Duraklatıldı" : video.status === "blocked" ? "Erişim / tarama sorunu" : running ? "Yorumlar alınıyor" : video.lastError ? "Tekrar denenecek" : video.continuing ? "Tarama devam edecek" : video.lastSyncedAt ? "Son tarama tamamlandı" : "İlk tarama bekleniyor";
+      const scan = sourceScanStatus({ ...video, running: Boolean(running), lastError: Boolean(video.lastError) });
       return <article className="panel watched-video-card" key={video.id}>
-        <div className="watched-video-meta"><span className={`review-platform ${video.platform}`}>{platforms[video.platform as VideoPlatform]}</span><span className={`badge ${video.lastError ? "warn" : video.status === "paused" ? "" : "blue"}`}>{status}</span></div>
+        <div className="watched-video-meta"><span className={`review-platform ${video.platform}`}>{platforms[video.platform as VideoPlatform]}</span><span className={`badge ${scan.warning ? "warn" : video.status === "paused" ? "" : "blue"}`}>{scan.label}</span></div>
         <h3><a href={video.url} target="_blank" rel="noopener noreferrer">{video.title || "Video / paylaşım"}<UiIcon name="arrow" size={15} /></a></h3>
         <a className="small muted" href={video.url} target="_blank" rel="noopener noreferrer" style={{ overflowWrap: "anywhere" }}>{video.url}</a>
         <p className="small muted">{video.channelName || (video.provider === "apify" ? "Harici yayın" : "Kanal bilgisi ilk taramada alınır")}{video.provider === "apify" ? ` · Apify · ${video.pollMinutes} dk · $${(video.maxChargeCents / 100).toFixed(2)} / tarama sınırı` : ""}</p>
         <div className="watched-video-stats"><strong>{video.count} yorum</strong><span className="small muted">{video.lastSyncedAt ? `Son tarama: ${new Date(video.lastSyncedAt).toLocaleString("tr-TR", { timeZone: "Europe/Istanbul" })}` : "Tarama henüz tamamlanmadı"}</span></div>
         {video.lastError ? <p className="notice small">{sourceError(video.lastError)}</p> : null}
+        <p className="small muted">{scan.note}</p>
+        {video.provider === "apify" ? <details><summary>Sonraki taramanın kapsam ve bütçesi</summary>
+          <form key={video.revision} onSubmit={(event) => { void configure(video, event); }}><fieldset disabled={busy !== null || Boolean(running) || video.continuing} className="llm-fields">
+            <label>Üst yorum sınırı<input className="input" name="resultsLimit" type="number" min={1} max={10000} required defaultValue={video.resultsLimit} /></label>
+            <label>Tarama aralığı · dakika<input className="input" name="pollMinutes" type="number" min={15} max={10080} required defaultValue={video.pollMinutes} /></label>
+            <label>Tarama başına bütçe · USD<input className="input" name="charge" type="number" min={0.1} max={100} step={0.01} required defaultValue={video.maxChargeCents / 100} /></label>
+            <p className="small muted">Yeni tarama seçilen sınırlarla yeniden başlar; önceki taramanın devamı değildir. Limit ve bütçeyi artırmak tam geçmiş garantisi vermez. Süren çalışma bitmeden ayarlar değiştirilemez.</p>
+            <button className="btn" type="submit">Limitleri kaydet</button>
+          </fieldset></form></details> : null}
         {video.provider === "apify" ? <p className="small muted">{video.lastRunCount === 0 ? "Son tarama hiç yorum döndürmedi; bu, yorum olmadığı anlamına gelmeyebilir." : "Taramalar erişilebilen yorumları kapsar; tam kapsama garantisi yoktur."}
           {video.lastRunId ? <> <a href={`https://console.apify.com/actors/runs/${video.lastRunId}`} target="_blank" rel="noopener noreferrer">Apify çalışmasını aç ↗</a></> : null}</p> : null}
         {video.provider === "apify" && video.status === "blocked" && video.continuing ? <div className="watched-video-actions">

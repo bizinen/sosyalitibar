@@ -123,15 +123,21 @@ export function CommentWorkspace({ rows: initialRows, updateCursor, nextCursor, 
         controller = new AbortController();
         const timeout = setTimeout(() => controller?.abort(), 10000);
         try {
-          const watched = rows.slice(0, 100);
-          const response = await fetch(`/api/items/updates?after=${encodeURIComponent(updateCursor)}&ids=${watched.map((row) => row.item.id).join(",")}`, { cache: "no-store", signal: controller.signal });
-          if (!response.ok) throw new Error("updates_failed");
-          const body = await response.json();
+          let count = 0;
+          let changed = 0;
+          for (let offset = 0; offset < Math.max(rows.length, 1); offset += 1000) {
+            const watched = rows.slice(offset, offset + 1000);
+            const response = await fetch("/api/items/updates", { method: "POST", headers: { "content-type": "application/json" },
+              body: JSON.stringify({ after: updateCursor, ids: watched.map((row) => row.item.id) }), cache: "no-store", signal: controller.signal });
+            if (!response.ok) throw new Error("updates_failed");
+            const body = await response.json();
+            count = Math.max(count, Number(body.count) || 0);
+            const versions = new Map<string, number>((body.updates ?? []).map((update: { id: string; updatedAt: string }) => [update.id, new Date(update.updatedAt).getTime()]));
+            changed += watched.filter((row) => versions.get(row.item.id) !== row.item.updatedAt.getTime()).length;
+          }
           if (!stopped) {
             setPollError(false);
-            setUpdates({ rows, cursor: updateCursor, count: Number(body.count) || 0,
-              changed: watched.filter((row) => !body.updates?.some((update: { id: string; updatedAt: string }) => update.id === row.item.id
-                && new Date(update.updatedAt).getTime() === row.item.updatedAt.getTime())).length });
+            setUpdates({ rows, cursor: updateCursor, count, changed });
           }
         } catch { if (!stopped) setPollError(true); }
         finally { clearTimeout(timeout); }

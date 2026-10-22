@@ -8,7 +8,7 @@ import { auditLogs, llmSettings } from "@/db/schema";
 import { env } from "@/lib/config";
 import { decryptSecret, encryptSecret } from "@/lib/crypto";
 import { readResponseBody } from "@/lib/http-body";
-import { llmProviderId } from "@/lib/llm-providers";
+import { llmProviderId, validLlmModelId } from "@/lib/llm-providers";
 
 const schema = z.object({
   provider: z.enum(["openai", "gemini", "openrouter", "runware", "custom"]).optional(),
@@ -28,6 +28,7 @@ export async function PUT(req: Request) {
   const value = parsed.data;
   const url = new URL(value.baseUrl);
   const providerId = llmProviderId(value.baseUrl);
+  if (!validLlmModelId(value.baseUrl, value.model)) return NextResponse.json({ error: "invalid_model" }, { status: 400 });
   if (value.provider && value.provider !== providerId) return NextResponse.json({ error: "invalid_provider_url" }, { status: 400 });
   const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
   if (!["https:", "http:"].includes(url.protocol) || url.username || url.password || url.search || url.hash

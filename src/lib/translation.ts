@@ -31,7 +31,7 @@ export async function translateToTurkish(text: string, heartbeat: () => Promise<
           const response = await fetch(`${provider.base.replace(/\/+$/, "")}/chat/completions`, {
             method: "POST", redirect: "error", signal: controller.signal,
             headers: { "content-type": "application/json", authorization: `Bearer ${provider.key}` },
-            body: JSON.stringify({ model: provider.model, ...llmRequestOptions(provider.base, 4096, 0), response_format: { type: "json_object" },
+            body: JSON.stringify({ model: provider.model, ...llmRequestOptions(provider.base, 4096, 0, provider.model),
               messages: [{ role: "system", content: translationPrompt(cfg.policy) },
                 { role: "user", content: JSON.stringify({ text: points.slice(offset, offset + 3000).join("") }) }],
             }),

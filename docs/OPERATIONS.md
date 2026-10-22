@@ -11,7 +11,11 @@ Production'da iki uygulama prosesi çalıştırın:
 1. `app`: Next.js HTTP server
 2. `worker`: `node scripts/scheduler.mjs`
 
-Yerel geliştirmede `npm run dev` yalnız HTTP sunucusunu başlatır. Yorum toplama, analiz ve alarm kuyrukları için ayrı terminalde `npm run worker` çalıştırın; bu komut `.env.local` dosyasını yükler. Sunucu açık olsa bile worker çalışmıyorsa izlenen videolar "İlk tarama bekleniyor" durumunda kalır.
+Yerel geliştirmede `npm run dev` web sunucusunu ve worker'ı birlikte yönetir. Worker DB readiness sonrasında başlar; beklenmeyen kapanışında sınırlı backoff ile yeniden başlatılır. Web sunucusu veya üst süreç kapatılınca worker da kapatılır. Port için `npm run dev -- --port 3001` kullanılabilir. Mevcut ayrı bir HTTP sunucusuna bağlanmak için `npm run worker` hâlâ kullanılabilir; yönetilen başlangıçla aynı anda ikinci worker başlatmak gerekmez.
+
+Production'da ayrı `app` ve `worker` servisleri korunur. Worker container'ı `/api/metrics` üzerinden heartbeat liveness kontrolü yapar; restart policy süreç kapanmasını ele alır. `app` readiness HTTP 200 yanıtı yalnız DB erişimini gösterir. Güncel heartbeat de tek başına sağlayıcı/alarm teslimatı başarısı değildir; son başarısız görev ve kuyruk metriklerini ayrıca izleyin.
+
+LLM erişimi düzeltildikten sonra Sistem durumu → Manuel işlemler → **401 hatalı analizleri yeniden kuyruğa al**, yalnız yeni/erişilebilir ve 401 nedeniyle dead olan en fazla 100 yorumu alır. İnsan incelemesi, silinmiş/erişilemeyen kayıtlar ve başka hata sınıfları topluca açılmaz. Revizyon, eski analiz/teslim edilmemiş alarm iptali ve audit aynı transaction içinde korunur. Sonuçları analiz kuyruğundan doğrulayın.
 
 Video işçisinin heartbeat kaydı için `0023_video_worker_heartbeat.sql` migration'ı da uygulanmalıdır; önceki DB kuralı yalnız eski görevleri kabul eder.
 

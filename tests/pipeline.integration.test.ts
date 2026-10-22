@@ -26,6 +26,13 @@ import { commentRows, sourceKey } from "@/lib/comment-feed";
 import { commentSources } from "@/lib/comment-sources";
 import { PUT as saveMetaSettings } from "@/app/api/settings/meta/route";
 import { GET as oauthCallback } from "@/app/api/meta/callback/route";
+import { PUT as saveLlmSettings } from "@/app/api/settings/llm/route";
+import VideosPage from "@/app/settings/videos/page";
+import { collectWatchedVideos } from "@/lib/watched-videos";
+import { PATCH as configureVideo } from "@/app/api/videos/[id]/route";
+import { POST as pollUpdates, GET as pollLegacyUpdates } from "@/app/api/items/updates/route";
+import * as auditModule from "@/lib/audit";
+import { POST as retryDeadAnalysis } from "@/app/api/admin/dead-letter/analysis/[id]/route";
 
 const mocks = vi.hoisted(() => ({ analyze: vi.fn(), debug: vi.fn(), posts: vi.fn(), comments: vi.fn(), replies: vi.fn(),
   exchange: vi.fn(), longToken: vi.fn(), user: vi.fn(), scopes: vi.fn(), pages: vi.fn(), subscribe: vi.fn() }));
@@ -80,7 +87,7 @@ async function pausedAnalysis(connectionId?: string) {
   return { source, job: job!, work, release };
 }
 
-describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline invariants", () => {
+describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline invariants", { timeout: 15000 }, () => {
   beforeAll(async () => {
     if (!process.env.TEST_DATABASE_URL?.endsWith("/sosyal_itibar_test")) throw new Error("Dedicated sosyal_itibar_test database required");
     vi.stubEnv("DATABASE_URL", process.env.TEST_DATABASE_URL);
@@ -637,6 +644,159 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
     pending.release.resolve({ ...result(), inputHash: "old" });
     expect(await pending.work).toEqual({ processed: false, reason: "lost_lock" });
     expect((await db.query.socialAnalyses.findFirst())?.inputHash).toBe("a".repeat(64));
+  });
+
+  it("recovers at most 100 authentication failures and preserves human and unavailable records", async () => {
+    const rows = await db.insert(socialItems).values(Array.from({ length: 101 }, (_, index) => ({
+      platform: "youtube", externalId: `dead-${index}`, text: "sentetik", analysisStatus: "dead", analysisError: "LLM HTTP 401", analysisAttempts: 5,
+    }))).returning();
+    const [reviewed] = await db.insert(socialItems).values({ platform: "youtube", externalId: "reviewed", text: "insan inceledi",
+      analysisStatus: "dead", analysisError: "LLM HTTP 401", reviewStatus: "reviewed" }).returning();
+    await db.insert(socialItems).values([
+      { platform: "youtube", externalId: "other-error", text: "sentetik", analysisStatus: "dead", analysisError: "LLM HTTP 429" },
+      { platform: "youtube", externalId: "unavailable", text: "sentetik", analysisStatus: "dead", analysisError: "LLM HTTP 401", sourceUnavailableAt: new Date() },
+    ]);
+    const response = await retryDeadAnalysis(request(), params("auth-failures"));
+    expect(await response.json()).toEqual({ ok: true, count: 100 });
+    const pending = await db.select().from(socialItems).where(eq(socialItems.analysisStatus, "pending"));
+    expect(pending).toHaveLength(100);
+    expect(pending.every((row) => row.analysisRevision === 2 && row.analysisAttempts === 0 && row.analysisError === null)).toBe(true);
+    expect((await db.query.socialItems.findFirst({ where: eq(socialItems.id, reviewed!.id) }))?.reviewStatus).toBe("reviewed");
+    const recoveryAudit = await db.query.auditLogs.findFirst({ where: eq(auditLogs.action, "dead_letter.analysis_requeue") });
+    expect(recoveryAudit?.metadata.reason).toBe("authentication_recovery");
+    expect((recoveryAudit?.metadata.ids as string[])).toHaveLength(100);
+    const [left] = rows.filter((row) => !pending.some((candidate) => candidate.id === row.id));
+    expect(left).toBeDefined();
+    expect(await (await retryDeadAnalysis(request(), params("auth-failures"))).json()).toEqual({ ok: true, count: 1 });
+    expect(await (await retryDeadAnalysis(request(), params("auth-failures"))).json()).toEqual({ ok: true, count: 0 });
+  });
+
+  it("rolls back a requeue when its audit write fails", async () => {
+    const source = await item();
+    await db.update(socialItems).set({ analysisStatus: "dead", analysisError: "LLM HTTP 401" }).where(eq(socialItems.id, source.id));
+    const spy = vi.spyOn(auditModule, "audit").mockRejectedValueOnce(new Error("audit unavailable"));
+    try { await expect(retryDeadAnalysis(request(), params(source.id))).rejects.toThrow("audit unavailable"); }
+    finally { spy.mockRestore(); }
+    expect(await db.query.socialItems.findFirst({ where: eq(socialItems.id, source.id) })).toMatchObject({ analysisStatus: "dead", analysisRevision: 1 });
+  });
+
+  it("serializes duplicate requeues without advancing the revision twice", async () => {
+    const source = await item();
+    await db.update(socialItems).set({ analysisStatus: "dead" }).where(eq(socialItems.id, source.id));
+    const responses = await Promise.all([retryDeadAnalysis(request(), params(source.id)), retryDeadAnalysis(request(), params(source.id))]);
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 409]);
+    expect(await db.query.socialItems.findFirst({ where: eq(socialItems.id, source.id) })).toMatchObject({ analysisStatus: "pending", analysisRevision: 2 });
+  });
+
+  it("polls older loaded comments in bounded POST batches and rejects unsafe requests", async () => {
+    const rows = await db.insert(socialItems).values(Array.from({ length: 1005 }, (_, index) => ({
+      platform: "youtube", externalId: `loaded-${index}`, text: "sentetik",
+    }))).returning();
+    const after = encodeItemCursor({ at: new Date("2100-01-01"), id: rows[0]!.id });
+    const make = (ids: string[], origin = "http://localhost:3000") => new Request("http://localhost:3000/api/items/updates", {
+      method: "POST", headers: { origin, "content-type": "application/json" }, body: JSON.stringify({ after, ids }),
+    });
+    const first = await pollUpdates(make(rows.slice(0, 1000).map((row) => row.id)));
+    expect(first.status).toBe(200); expect((await first.json()).updates).toHaveLength(1000);
+    await db.update(socialItems).set({ reviewStatus: "reviewed" }).where(eq(socialItems.id, rows[1004]!.id));
+    const tail = await (await pollUpdates(make(rows.slice(1000).map((row) => row.id)))).json();
+    expect(tail.updates.find((row: { id: string }) => row.id === rows[1004]!.id).reviewStatus).toBe("reviewed");
+    expect((await pollUpdates(make(rows.map((row) => row.id)))).status).toBe(400);
+    expect((await pollUpdates(make([], "https://evil.test"))).status).toBe(403);
+    expect((await pollUpdates(request({ after, ids: [], extra: "x".repeat(65536) }))).status).toBe(400);
+    expect((await pollLegacyUpdates(new Request(`http://localhost:3000/api/items/updates?after=${after}&ids=${rows[0]!.id}`))).status).toBe(200);
+  });
+
+  it("edits scan limits without deleting history, resuming a pause or replacing a running scan", async () => {
+    const [video] = await db.insert(watchedVideos).values({ platform: "instagram", provider: "apify", externalId: "public:instagram:AuditPost",
+      url: "https://www.instagram.com/p/AuditPost", status: "paused", lastSyncedAt: new Date(), availableAt: new Date(Date.now() + 3600000) }).returning();
+    const settings = { resultsLimit: 5000, maxChargeCents: 200, pollMinutes: 120 };
+    const response = await configureVideo(request({ action: "configure", revision: 1, settings }), params(video!.id));
+    expect(response.status).toBe(200);
+    const saved = await db.query.watchedVideos.findFirst({ where: eq(watchedVideos.id, video!.id) });
+    expect(saved).toMatchObject({ ...settings, status: "paused", revision: 2 });
+    expect((await configureVideo(request({ action: "configure", revision: 1, settings }), params(video!.id))).status).toBe(409);
+    await db.update(watchedVideos).set({ progressEncrypted: encryptSecret("unfinished") }).where(eq(watchedVideos.id, video!.id));
+    expect((await configureVideo(request({ action: "configure", revision: 2, settings }), params(video!.id))).status).toBe(409);
+    expect((await configureVideo(request({ action: "configure", revision: 2, settings: { ...settings, resultsLimit: 10001 } }), params(video!.id))).status).toBe(400);
+    expect(mocks.analyze).not.toHaveBeenCalled();
+  });
+
+  it("exposes overdue source coverage without leaking source credentials or checkpoints", async () => {
+    await db.insert(watchedVideos).values({ platform: "instagram", provider: "apify", externalId: "public:instagram:AuditPost",
+      url: "https://www.instagram.com/p/AuditPost", apiKeyEncrypted: encryptSecret("do-not-expose"),
+      availableAt: new Date(Date.now() - 3600000), lastSyncedAt: new Date(Date.now() - 7200000) });
+    const page = await commentSources({});
+    expect(page.rows[0]?.scan).toMatchObject({ overdue: true, provider: "apify", resultsLimit: 1000, maxChargeCents: 100, running: false });
+    expect(JSON.stringify(page)).not.toContain("do-not-expose");
+    expect(JSON.stringify(page)).not.toContain("api_key_encrypted");
+    const connected = await connection("disabled");
+    await upsertSocialItem({ connectionId: connected.id, platform: "facebook", externalId: "meta-comment", rootExternalId: "meta-post", text: "sentetik" });
+    const metaPage = await commentSources({ platform: "facebook" });
+    expect(metaPage.rows[0]?.scan).toMatchObject({ provider: "meta", status: "paused" });
+  });
+
+  it.each([false, true])("blocks cursor cycles, including across worker checkpoints: %s", async (acrossRuns) => {
+    const [video] = await db.insert(watchedVideos).values({ platform: "youtube", externalId: "dQw4w9WgXcQ",
+      url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", apiKeyEncrypted: encryptSecret("fixture-key"),
+      progressEncrypted: encryptSecret(JSON.stringify({ phase: "comments", token: null, nextComments: null, parents: [], text: "Sentetik kaynak", channel: "Sentetik" })) }).returning();
+    let requests = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: string) => {
+      const url = new URL(input); const token = Number(url.searchParams.get("pageToken") ?? 0); requests++;
+      return Response.json({ items: [{ id: `thread-${token}`, snippet: { totalReplyCount: 0,
+        topLevelComment: { id: `comment-${token}`, snippet: { textDisplay: "sentetik", publishedAt: "2026-10-22T00:00:00Z" } } } }],
+        nextPageToken: String(token >= (acrossRuns ? 12 : 2) ? 1 : token + 1) });
+    }));
+    let [result] = await collectWatchedVideos();
+    if (acrossRuns) {
+      expect(result).toMatchObject({ completed: false });
+      const pending = await db.query.watchedVideos.findFirst({ where: eq(watchedVideos.id, video!.id) });
+      expect(JSON.parse(decryptSecret(pending!.progressEncrypted!)).seen).toHaveLength(12);
+      await db.update(watchedVideos).set({ availableAt: new Date() }).where(eq(watchedVideos.id, video!.id));
+      [result] = await collectWatchedVideos();
+    }
+    expect(result).toMatchObject({ error: "source_pagination_stalled" });
+    expect((await db.query.watchedVideos.findFirst({ where: eq(watchedVideos.id, video!.id) }))?.status).toBe("blocked");
+    expect(requests).toBe(acrossRuns ? 13 : 3);
+  });
+
+  it("accepts a repeated reply token under different parents without reporting a cursor cycle", async () => {
+    await db.insert(watchedVideos).values({ platform: "youtube", externalId: "dQw4w9WgXcQ",
+      url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", apiKeyEncrypted: encryptSecret("fixture-key"),
+      progressEncrypted: encryptSecret(JSON.stringify({ phase: "comments", token: null, nextComments: null, parents: [], text: "kaynak", channel: "sentetik" })) });
+    const comment = (id: string) => ({ id, snippet: { textDisplay: "sentetik", publishedAt: "2026-10-22T00:00:00Z" } });
+    vi.stubGlobal("fetch", vi.fn(async (input: string) => {
+      const url = new URL(input); const parent = url.searchParams.get("parentId");
+      if (!parent) return Response.json({ items: ["parent-1", "parent-2"].map(id => ({ id, snippet: { topLevelComment: comment(id), totalReplyCount: 2 } })) });
+      return Response.json({ items: [comment(`${parent}-${url.searchParams.get("pageToken") || "first"}`)],
+        ...(!url.searchParams.get("pageToken") ? { nextPageToken: "same-token" } : {}) });
+    }));
+    expect((await collectWatchedVideos())[0]).toMatchObject({ completed: true });
+    expect(await db.select().from(socialItems)).toHaveLength(6);
+  });
+
+  it("deduplicates parents repeated across comment pages without falsely blocking reply pagination", async () => {
+    await db.insert(watchedVideos).values({ platform: "youtube", externalId: "dQw4w9WgXcQ",
+      url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", apiKeyEncrypted: encryptSecret("fixture-key"),
+      progressEncrypted: encryptSecret(JSON.stringify({ phase: "comments", token: null, nextComments: null, parents: [], text: "kaynak", channel: "sentetik" })) });
+    const comment = (id: string) => ({ id, snippet: { textDisplay: "sentetik", publishedAt: "2026-10-22T00:00:00Z" } });
+    vi.stubGlobal("fetch", vi.fn(async (input: string) => {
+      const url = new URL(input);
+      if (url.searchParams.get("parentId")) return Response.json({ items: [comment("reply")] });
+      return Response.json({ items: [1, 2].map(() => ({ id: "thread", snippet: { topLevelComment: comment("parent"), totalReplyCount: 1 } })),
+        ...(!url.searchParams.get("pageToken") ? { nextPageToken: "next-threads" } : {}) });
+    }));
+    expect((await collectWatchedVideos())[0]).toMatchObject({ completed: true });
+    expect(await db.select().from(socialItems)).toHaveLength(2);
+    const page = await VideosPage();
+    const videos = page.props.children[1].props.children[1].props.videos as Array<{ count: number }>;
+    expect(videos[0]?.count).toBe(2);
+  });
+
+  it("rejects invalid Runware models before changing stored settings", async () => {
+    const response = await saveLlmSettings(request({ provider: "runware", baseUrl: "https://api.runware.ai/v1", model: "1", apiKey: "fixture", revision: 0 }));
+    expect(response.status).toBe(400); expect(await response.json()).toEqual({ error: "invalid_model" });
+    expect((await db.execute(sql`select count(*)::int as count from llm_settings`))[0]?.count).toBe(0);
   });
 
   it("accepts an OAuth nonce once, including parallel replay attempts", async () => {

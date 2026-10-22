@@ -16,6 +16,20 @@ function comments(init: RequestInit | undefined) {
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 describe("batched triage", () => {
+  it("uses the Runware GPT-OSS workaround without weakening strict output validation", async () => {
+    const settings = { ...cfg, LLM_BASE_URL: "https://api.runware.ai/v1", LLM_MODEL: "openai:gpt-oss@120b" };
+    const fetcher = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      expect(JSON.parse(String(init?.body))).not.toHaveProperty("response_format");
+      return response(comments(init).map(({ id }) => ({ id, label: "insan_incelemesi_gerekli" })));
+    });
+    vi.stubGlobal("fetch", fetcher);
+    await expect(createBatchAnalyzer(1, settings)(input)).resolves.toMatchObject({ data: { label: "insan_incelemesi_gerekli" } });
+    fetcher.mockImplementation(async () => response([{ id: "foreign", label: "inceleme_gerekmiyor" }]));
+    await expect(createBatchAnalyzer(1, settings)(input)).rejects.toThrow("geçersiz");
+    fetcher.mockImplementation(async () => new Response(JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: '{"{"results":[]}' } }] })));
+    await expect(createBatchAnalyzer(1, settings)(input)).rejects.toThrow("geçersiz");
+  });
+
   it("sends one request with shared post context and maps reordered IDs to the right comments", async () => {
     const fetcher = vi.fn(async (_url: unknown, init?: RequestInit) => {
       const body = request(init);
