@@ -33,6 +33,7 @@ export function commentConditions(p: CommentParams) {
   if (p.view === "normal") conditions.push(eq(socialAnalyses.triageLabel, "inceleme_gerekmiyor"));
   if (p.view === "urgent") conditions.push(eq(socialAnalyses.triageLabel, "acil_inceleme"));
   if (p.view === "failed") conditions.push(eq(socialItems.analysisStatus, "dead"));
+  if (p.view === "history") conditions.push(eq(socialItems.analysisExcluded, true));
   if (p.view === "unavailable") conditions.push(isNotNull(socialItems.sourceUnavailableAt));
   if (p.view === "human" || p.view === "confirmed") conditions.push(sql`exists (select 1 from item_review_events r where r.item_id = ${socialItems.id}
     and r.analysis_revision = ${socialItems.analysisRevision} and r.assessment is not null
@@ -49,6 +50,10 @@ export function commentConditions(p: CommentParams) {
   if (p.needsReview === "true") conditions.push(eq(socialAnalyses.needsReview, true));
   if (p.q?.trim()) conditions.push(ilike(socialItems.text, `%${p.q.trim().slice(0, 120)}%`));
   if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(p.connection || "")) conditions.push(eq(socialItems.connectionId, p.connection!));
+  if (/^youtube:[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(p.connection ?? "")) {
+    conditions.push(sql`exists (select 1 from watched_videos v where v.channel_id = ${p.connection!.slice(8)}::uuid
+      and v.platform = ${socialItems.platform} and v.external_id = ${socialItems.rootExternalId})`);
+  }
   if (p.target) {
     const assessment = sql`(select r.assessment from item_review_events r where r.item_id = ${socialItems.id}
       and r.analysis_revision = ${socialItems.analysisRevision} order by r.sequence desc limit 1)`;

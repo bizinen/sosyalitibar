@@ -14,6 +14,7 @@ export function AdminNav() {
     { href: "/settings/videos", label: "İzlenen videolar", icon: "comments" as const },
     { href: "/settings/alerts", label: "Alarmlar", icon: "bell" as const },
     { href: "/settings/llm", label: "AI ayarları", icon: "spark" as const },
+    { href: "/settings/integrations", label: "Bağlantı ayarları", icon: "settings" as const },
     { href: "/settings/operations", label: "Sistem durumu", icon: "settings" as const },
   ];
   const title = links.find((link) => link.href === pathname)?.label ?? "Çalışma alanı";

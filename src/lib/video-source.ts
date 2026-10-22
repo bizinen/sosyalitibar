@@ -8,6 +8,18 @@ export const videoScanSettingsSchema = z.object({
 
 export type VideoPlatform = "youtube" | "facebook" | "instagram";
 
+export function youtubeChannelReference(value: string): { id?: string; forHandle?: string; forUsername?: string } {
+  const url = new URL(value);
+  if (url.protocol !== "https:" || url.username || url.password || url.port || url.search || url.hash
+    || !["youtube.com", "www.youtube.com", "m.youtube.com"].includes(url.hostname)) throw new Error("invalid_channel_url");
+  let parts = decodeURIComponent(url.pathname).replace(/\/$/, "").split("/").slice(1);
+  if (["videos", "shorts", "streams", "featured"].includes(parts.at(-1) ?? "")) parts = parts.slice(0, -1);
+  if (parts.length === 2 && parts[0] === "channel" && /^UC[A-Za-z0-9_-]{22}$/.test(parts[1]!)) return { id: parts[1]! };
+  if (parts.length === 1 && /^@[^\s/@?#]{1,100}$/.test(parts[0]!)) return { forHandle: parts[0]! };
+  if (parts.length === 2 && parts[0] === "user" && /^[A-Za-z0-9_.-]{1,100}$/.test(parts[1]!)) return { forUsername: parts[1]! };
+  throw new Error("invalid_channel_url");
+}
+
 export function videoSource(platform: VideoPlatform, value: string, resourceId?: string, publicSource = false) {
   const url = new URL(value);
   if (url.protocol !== "https:" || url.username || url.password || (url.port && url.port !== "443")) throw new Error("invalid_video_url");

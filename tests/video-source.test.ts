@@ -1,5 +1,17 @@
 import { expect, it } from "vitest";
-import { videoSource } from "@/lib/video-source";
+import { videoSource, youtubeChannelReference } from "@/lib/video-source";
+
+it.each(["https://www.youtube.com/@kanal", "https://youtube.com/@kanal/videos", "https://youtube.com/@kanal/shorts"])("resolves channel handles without search scraping: %s", url => {
+  expect(youtubeChannelReference(url)).toEqual({ forHandle: "@kanal" });
+});
+it("accepts canonical channel and legacy username references", () => {
+  const id = `UC${"a".repeat(22)}`;
+  expect(youtubeChannelReference(`https://youtube.com/channel/${id}`)).toEqual({ id });
+  expect(youtubeChannelReference("https://youtube.com/user/kanal")).toEqual({ forUsername: "kanal" });
+});
+it.each(["https://youtube.com.evil.test/@kanal", "https://youtube.com@evil.test/@kanal", "http://youtube.com/@kanal", "https://youtube.com/watch?v=dQw4w9WgXcQ"])("rejects unsafe and non-channel inputs: %s", url => {
+  expect(() => youtubeChannelReference(url)).toThrow("invalid_channel_url");
+});
 
 it.each([
   "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=13",

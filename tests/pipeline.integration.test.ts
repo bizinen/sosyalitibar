@@ -28,6 +28,10 @@ import { PUT as saveMetaSettings } from "@/app/api/settings/meta/route";
 import { GET as oauthCallback } from "@/app/api/meta/callback/route";
 import { PUT as saveLlmSettings } from "@/app/api/settings/llm/route";
 import VideosPage from "@/app/settings/videos/page";
+import { POST as addYouTubeChannel } from "@/app/api/youtube/channels/route";
+import { PUT as saveYouTubeSettings } from "@/app/api/settings/youtube/route";
+import { POST as addVideo } from "@/app/api/videos/route";
+import { invalidateAnalyses } from "@/lib/analysis-state";
 import { collectWatchedVideos } from "@/lib/watched-videos";
 import { PATCH as configureVideo } from "@/app/api/videos/[id]/route";
 import { POST as pollUpdates, GET as pollLegacyUpdates } from "@/app/api/items/updates/route";
@@ -103,7 +107,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
   });
   beforeEach(async () => {
     await db.execute(sql`truncate audit_logs, webhook_events, alert_outbox, social_analyses, social_items,
-      connection_targets, social_connections, meta_auth_accounts, monitoring_targets, oauth_nonces, auth_rate_limits, alert_settings, worker_heartbeats, ai_policy, meta_settings, llm_settings cascade`);
+      connection_targets, social_connections, meta_auth_accounts, monitoring_targets, oauth_nonces, auth_rate_limits, alert_settings, worker_heartbeats, ai_policy, meta_settings, llm_settings, youtube_settings cascade`);
     mocks.analyze.mockReset().mockResolvedValue(result());
     mocks.debug.mockReset().mockResolvedValue({ isValid: true, scopes: ["pages_read_engagement", "pages_read_user_content", "pages_manage_metadata"], expiresAt: null });
     mocks.posts.mockReset().mockResolvedValue({ data: [] });
@@ -797,6 +801,203 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
     const response = await saveLlmSettings(request({ provider: "runware", baseUrl: "https://api.runware.ai/v1", model: "1", apiKey: "fixture", revision: 0 }));
     expect(response.status).toBe(400); expect(await response.json()).toEqual({ error: "invalid_model" });
     expect((await db.execute(sql`select count(*)::int as count from llm_settings`))[0]?.count).toBe(0);
+  });
+
+  it("adds a channel through the account API with encrypted credentials and an immutable history cutoff", async () => {
+    const id = `UC${"a".repeat(22)}`;
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ items: [{ id, snippet: { title: "Kanal" }, contentDetails: { relatedPlaylists: { uploads: "uploads-fixture" } } }] })));
+    expect((await addYouTubeChannel(request({ url: "https://www.youtube.com/@kanal", apiKey: "fixture-key" }))).status).toBe(400);
+    expect((await addYouTubeChannel(request({ url: "https://www.youtube.com/@kanal" }))).status).toBe(400);
+    expect((await saveYouTubeSettings(request({ apiKey: "fixture-key", revision: 0 }))).status).toBe(200);
+    expect((await addYouTubeChannel(request({ url: "https://www.youtube.com/@kanal" }))).status).toBe(201);
+    const channel = await db.query.watchedVideos.findFirst();
+    expect(channel).toMatchObject({ sourceKind: "channel", externalId: id, status: "active" });
+    expect(channel!.analysisAfter).toBeInstanceOf(Date);
+    expect(channel!.apiKeyEncrypted).toBeNull();
+    expect(decryptSecret((await db.query.youtubeSettings.findFirst())!.apiKeyEncrypted)).toBe("fixture-key");
+    expect((await addYouTubeChannel(request({ url: "https://www.youtube.com/@kanal" }))).status).toBe(409);
+    expect((await addYouTubeChannel(request({ url: "https://youtube.com.evil.test/@kanal" }))).status).toBe(400);
+    expect((await addYouTubeChannel(new Request("http://localhost:3000/api/youtube/channels", { method: "POST", headers: { origin: "https://evil.test" } }))).status).toBe(403);
+    await configureVideo(request({ action: "remove", revision: 1 }), params(channel!.id));
+    expect((await addYouTubeChannel(request({ url: "https://www.youtube.com/@kanal" }))).status).toBe(201);
+    expect((await db.query.watchedVideos.findFirst())!.analysisAfter).toEqual(channel!.analysisAfter);
+  });
+
+  it("saves central YouTube credentials with CAS, origin protection and secret-free responses/audits", async () => {
+    expect((await saveYouTubeSettings(new Request("http://localhost:3000/api/settings/youtube", { method: "PUT", headers: { origin: "https://evil.test" } }))).status).toBe(403);
+    expect((await saveYouTubeSettings(request({ apiKey: "invalid key", revision: 0 }))).status).toBe(400);
+    const saved = await saveYouTubeSettings(request({ apiKey: "central-fixture-secret", revision: 0 }));
+    expect(await saved.json()).toEqual({ saved: true, revision: 1 });
+    const current = await db.query.youtubeSettings.findFirst();
+    expect(current!.apiKeyEncrypted).not.toContain("central-fixture-secret");
+    expect(decryptSecret(current!.apiKeyEncrypted)).toBe("central-fixture-secret");
+    expect((await saveYouTubeSettings(request({ apiKey: "stale", revision: 0 }))).status).toBe(409);
+    const results = await Promise.all(["replacement-one", "replacement-two"].map(apiKey => saveYouTubeSettings(request({ apiKey, revision: 1 }))));
+    expect(results.map(response => response.status).sort()).toEqual([200, 409]);
+    expect((await db.query.youtubeSettings.findFirst())!.revision).toBe(2);
+    const audits = await db.select().from(auditLogs).where(eq(auditLogs.action, "youtube.settings_updated"));
+    expect(audits.map(row => row.metadata)).toEqual([{ revision: 1 }, { revision: 2 }]);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("adds videos using central settings and applies key replacement on the next source read", async () => {
+    expect((await addVideo(request({ platform: "youtube", url: "https://youtu.be/dQw4w9WgXcQ", apiKey: "inline" }))).status).toBe(400);
+    expect((await addVideo(request({ platform: "youtube", url: "https://youtu.be/dQw4w9WgXcQ" }))).status).toBe(400);
+    await saveYouTubeSettings(request({ apiKey: "old-central", revision: 0 }));
+    expect((await addVideo(request({ platform: "youtube", url: "https://youtu.be/dQw4w9WgXcQ" }))).status).toBe(201);
+    const video = (await db.query.watchedVideos.findFirst())!;
+    expect(video.apiKeyEncrypted).toBeNull();
+    await db.update(watchedVideos).set({ apiKeyEncrypted: encryptSecret("legacy-key") }).where(eq(watchedVideos.id, video.id));
+    await saveYouTubeSettings(request({ apiKey: "new-central", revision: 1 }));
+    vi.stubGlobal("fetch", vi.fn(async (input: string) => {
+      const url = new URL(input); expect(url.searchParams.get("key")).toBe("new-central");
+      return Response.json(url.pathname.endsWith("/videos") ? { items: [{ id: video.externalId, snippet: { title: "Video", description: "", channelTitle: "Kanal" } }] } : { items: [] });
+    }));
+    expect(await collectWatchedVideos()).toMatchObject([{ completed: true }]);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect((await db.query.youtubeSettings.findFirst())!.revision).toBe(2);
+  });
+
+  it("keeps comment collection moving while multiple channel archives remain due", async () => {
+    await saveYouTubeSettings(request({ apiKey: "central-key", revision: 0 }));
+    const channels = await db.insert(watchedVideos).values(["a", "b"].map(letter => ({ platform: "youtube", sourceKind: "channel", externalId: `UC${letter.repeat(22)}`,
+      url: `https://www.youtube.com/@${letter}`, uploadsPlaylistId: `uploads-${letter}`, analysisAfter: new Date(), availableAt: new Date("2020-01-01") }))).returning();
+    const [video] = await db.insert(watchedVideos).values({ platform: "youtube", externalId: "dQw4w9WgXcQ", url: "https://youtu.be/dQw4w9WgXcQ",
+      channelId: channels[0]!.id, analysisAfter: channels[0]!.analysisAfter }).returning();
+    vi.stubGlobal("fetch", vi.fn(async (input: string) => {
+      const url = new URL(input);
+      return Response.json(url.pathname.endsWith("/playlistItems") ? { items: [], nextPageToken: "more-archive" }
+        : url.pathname.endsWith("/videos") ? { items: [{ id: video!.externalId, snippet: { title: "Video", description: "", channelTitle: "Kanal" } }] } : { items: [] });
+    }));
+    const results = await collectWatchedVideos();
+    expect(results).toHaveLength(2);
+    expect(results).toContainEqual({ id: video!.id, completed: true });
+    expect(results).toContainEqual(expect.objectContaining({ discovered: 0, completed: false }));
+  });
+
+  it("discovers every playlist page without overriding existing video pauses or exposing channel rows as posts", async () => {
+    const [channel] = await db.insert(watchedVideos).values({ platform: "youtube", sourceKind: "channel", externalId: `UC${"a".repeat(22)}`,
+      url: "https://www.youtube.com/@kanal", uploadsPlaylistId: "uploads-fixture", analysisAfter: new Date(), apiKeyEncrypted: encryptSecret("fixture-key") }).returning();
+    await db.insert(watchedVideos).values({ platform: "youtube", externalId: "dQw4w9WgXcQ", url: "https://youtu.be/dQw4w9WgXcQ", status: "paused" });
+    vi.stubGlobal("fetch", vi.fn(async (input: string) => {
+      const url = new URL(input); expect(url.pathname).toContain("playlistItems");
+      return Response.json({ items: [{ snippet: { title: "Video", videoOwnerChannelId: channel!.externalId,
+        resourceId: { videoId: url.searchParams.get("pageToken") ? "7vk8aYpKBT0" : "dQw4w9WgXcQ" } } }],
+        ...(!url.searchParams.get("pageToken") ? { nextPageToken: "next-page" } : {}) });
+    }));
+    expect((await collectWatchedVideos())[0]).toMatchObject({ completed: false });
+    const pending = await db.query.watchedVideos.findFirst({ where: eq(watchedVideos.id, channel!.id) });
+    expect(decryptSecret(pending!.progressEncrypted!)).toContain("next-page");
+    await db.update(watchedVideos).set({ availableAt: new Date() }).where(eq(watchedVideos.id, channel!.id));
+    expect((await collectWatchedVideos())[0]).toMatchObject({ completed: true });
+    const rows = await db.select().from(watchedVideos);
+    expect(rows).toHaveLength(3);
+    expect(rows.find(row => row.externalId === "dQw4w9WgXcQ")!.status).toBe("paused");
+    expect(rows.find(row => row.externalId === "7vk8aYpKBT0")).toMatchObject({ channelId: channel!.id, analysisAfter: channel!.analysisAfter, pollMinutes: 1440 });
+    expect((await commentSources({})).rows.some(row => row.source_id === channel!.externalId)).toBe(false);
+    expect((await commentSources({ connection: `youtube:${channel!.id}` })).rows.map(row => row.source_id)).toEqual(["7vk8aYpKBT0"]);
+  });
+
+  it("archives historical comments and replies while analyzing only comments created after channel tracking", async () => {
+    const cutoff = new Date("2026-10-22T00:00:00Z");
+    const [channel] = await db.insert(watchedVideos).values({ platform: "youtube", sourceKind: "channel", externalId: `UC${"a".repeat(22)}`,
+      url: "https://www.youtube.com/@kanal", uploadsPlaylistId: "uploads-fixture", analysisAfter: cutoff,
+      availableAt: new Date("2100-01-01"), apiKeyEncrypted: encryptSecret("fixture-key") }).returning();
+    await db.insert(watchedVideos).values({ platform: "youtube", externalId: "dQw4w9WgXcQ", url: "https://youtu.be/dQw4w9WgXcQ", channelId: channel!.id, analysisAfter: cutoff });
+    const comment = (id: string, publishedAt: string) => ({ id, snippet: { textDisplay: "sentetik", publishedAt } });
+    vi.stubGlobal("fetch", vi.fn(async (input: string) => {
+      const url = new URL(input);
+      if (url.pathname.endsWith("/videos")) return Response.json({ items: [{ id: "dQw4w9WgXcQ", snippet: { title: "Video", description: "Açıklama", channelTitle: "Kanal" } }] });
+      if (url.pathname.endsWith("/comments")) return Response.json({ items: [comment("old-reply", cutoff.toISOString()), comment("new-reply", "2026-10-22T00:00:01Z")] });
+      return Response.json({ items: [{ id: "old-thread", snippet: { topLevelComment: comment("old", "2026-10-21T23:59:59Z"), totalReplyCount: 2 } },
+        { id: "new-thread", snippet: { topLevelComment: comment("new", "2026-10-22T00:00:01Z"), totalReplyCount: 0 } }] });
+    }));
+    expect((await collectWatchedVideos())[0]).toMatchObject({ completed: true });
+    const historical = await commentRows({ view: "history" });
+    expect(historical.map(row => row.item.externalId).sort()).toEqual(["old", "old-reply"]);
+    expect(historical.every(row => row.item.analysisExcluded && row.item.analysisStatus === "complete" && !row.analysis)).toBe(true);
+    const jobs = await claimAnalysisJobs(10);
+    const all = await db.select().from(socialItems);
+    expect(jobs.map(job => all.find(row => row.id === job.id)!.externalId).sort()).toEqual(["new", "new-reply"]);
+    await upsertSocialItem({ platform: "youtube", externalId: "old", text: "düzenlendi" });
+    await db.transaction(tx => invalidateAnalyses(tx));
+    expect((await db.query.socialItems.findFirst({ where: eq(socialItems.externalId, "old") }))!.analysisStatus).toBe("complete");
+    expect((await commentRows({ view: "history" }))).toHaveLength(2);
+    expect(mocks.analyze).not.toHaveBeenCalled();
+    expect(await db.select().from(alertOutbox)).toHaveLength(0);
+    expect(await commentRows({ connection: `youtube:${channel!.id}` })).toHaveLength(4);
+  });
+
+  it("does not write discovered videos after a concurrent channel pause and preserves history on removal", async () => {
+    const [channel] = await db.insert(watchedVideos).values({ platform: "youtube", sourceKind: "channel", externalId: `UC${"a".repeat(22)}`,
+      url: "https://www.youtube.com/@kanal", uploadsPlaylistId: "uploads-fixture", analysisAfter: new Date(), apiKeyEncrypted: encryptSecret("fixture-key") }).returning();
+    const entered = deferred<void>(), release = deferred<Response>();
+    vi.stubGlobal("fetch", vi.fn(() => { entered.resolve(); return release.promise; }));
+    const running = collectWatchedVideos(); await entered.promise;
+    expect((await configureVideo(request({ action: "pause", revision: 1 }), params(channel!.id))).status).toBe(200);
+    release.resolve(Response.json({ items: [{ snippet: { title: "Video", resourceId: { videoId: "dQw4w9WgXcQ" } } }] }));
+    await running;
+    expect(await db.select().from(watchedVideos)).toHaveLength(1);
+    expect((await db.query.watchedVideos.findFirst())!.status).toBe("paused");
+    expect(await collectWatchedVideos()).toHaveLength(0);
+    await db.insert(watchedVideos).values({ platform: "youtube", externalId: "dQw4w9WgXcQ", url: "https://youtu.be/dQw4w9WgXcQ", channelId: channel!.id, analysisAfter: channel!.analysisAfter });
+    const saved = (await upsertSocialItem({ platform: "youtube", externalId: "saved", rootExternalId: "dQw4w9WgXcQ", text: "geçmiş", analysisExcluded: true })).item;
+    await configureVideo(request({ action: "remove", revision: 2 }), params(channel!.id));
+    expect(await db.query.socialItems.findFirst({ where: eq(socialItems.id, saved.id) })).toBeDefined();
+    expect(await collectWatchedVideos()).toHaveLength(0);
+  });
+
+  it("persists the channel discovery cursor during quota exhaustion and resumes the same page", async () => {
+    const [channel] = await db.insert(watchedVideos).values({ platform: "youtube", sourceKind: "channel", externalId: `UC${"a".repeat(22)}`,
+      url: "https://www.youtube.com/@kanal", uploadsPlaylistId: "uploads-fixture", analysisAfter: new Date(), apiKeyEncrypted: encryptSecret("fixture-key") }).returning();
+    const fetchMock = vi.fn().mockResolvedValueOnce(Response.json({ items: [], nextPageToken: "page-2" }))
+      .mockResolvedValueOnce(Response.json({ error: { errors: [{ reason: "quotaExceeded" }] } }, { status: 403 }))
+      .mockResolvedValueOnce(Response.json({ items: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+    await collectWatchedVideos();
+    await db.update(watchedVideos).set({ availableAt: new Date() }).where(eq(watchedVideos.id, channel!.id));
+    expect((await collectWatchedVideos())[0]).toMatchObject({ error: "youtube_quota_exceeded" });
+    const waiting = await db.query.watchedVideos.findFirst();
+    expect(waiting).toMatchObject({ status: "active", attempts: 0 });
+    expect(decryptSecret(waiting!.progressEncrypted!)).toContain("page-2");
+    expect(waiting!.availableAt.getTime()).toBeGreaterThan(Date.now() + 3500000);
+    await db.update(watchedVideos).set({ availableAt: new Date() }).where(eq(watchedVideos.id, channel!.id));
+    expect((await collectWatchedVideos())[0]).toMatchObject({ completed: true });
+    expect(new URL(fetchMock.mock.calls[2]![0]).searchParams.get("pageToken")).toBe("page-2");
+  });
+
+  it("blocks repeated channel discovery cursors instead of looping forever", async () => {
+    const [channel] = await db.insert(watchedVideos).values({ platform: "youtube", sourceKind: "channel", externalId: `UC${"a".repeat(22)}`,
+      url: "https://www.youtube.com/@kanal", uploadsPlaylistId: "uploads-fixture", analysisAfter: new Date(), apiKeyEncrypted: encryptSecret("fixture-key") }).returning();
+    const fetchMock = vi.fn(async () => Response.json({ items: [], nextPageToken: "same-page" })); vi.stubGlobal("fetch", fetchMock);
+    for (let run = 0; run < 3; run++) {
+      await db.update(watchedVideos).set({ availableAt: new Date() }).where(eq(watchedVideos.id, channel!.id));
+      await collectWatchedVideos();
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(await db.query.watchedVideos.findFirst()).toMatchObject({ status: "blocked", lastError: "source_pagination_stalled" });
+  });
+
+  it("checks recent uploads during a long archive discovery without losing its older-page cursor", async () => {
+    const [channel] = await db.insert(watchedVideos).values({ platform: "youtube", sourceKind: "channel", externalId: `UC${"a".repeat(22)}`,
+      url: "https://www.youtube.com/@kanal", uploadsPlaylistId: "uploads-fixture", analysisAfter: new Date(), apiKeyEncrypted: encryptSecret("fixture-key"),
+      progressEncrypted: encryptSecret(JSON.stringify({ token: "archive-page", seen: [], headCheckedAt: 0 })) }).returning();
+    const fetchMock = vi.fn().mockResolvedValueOnce(Response.json({ items: [{ snippet: { title: "Yeni video", resourceId: { videoId: "dQw4w9WgXcQ" } } }], nextPageToken: "head-page-2" }))
+      .mockResolvedValueOnce(Response.json({ items: [] })); vi.stubGlobal("fetch", fetchMock);
+    expect((await collectWatchedVideos())[0]).toMatchObject({ completed: false });
+    expect(new URL(fetchMock.mock.calls[0]![0]).searchParams.has("pageToken")).toBe(false);
+    const saved = await db.query.watchedVideos.findFirst({ where: eq(watchedVideos.id, channel!.id) });
+    expect(JSON.parse(decryptSecret(saved!.progressEncrypted!))).toMatchObject({ token: "archive-page", seen: [] });
+    await db.update(watchedVideos).set({ status: "paused" }).where(eq(watchedVideos.externalId, "dQw4w9WgXcQ"));
+    await db.update(watchedVideos).set({ availableAt: new Date() }).where(eq(watchedVideos.id, channel!.id));
+    expect((await collectWatchedVideos())[0]).toMatchObject({ completed: true });
+    expect(new URL(fetchMock.mock.calls[1]![0]).searchParams.get("pageToken")).toBe("archive-page");
+  });
+
+  it("enforces the historical no-analysis policy at the database boundary", async () => {
+    const source = (await upsertSocialItem({ platform: "youtube", externalId: "historical", text: "eski", analysisExcluded: true })).item;
+    await expect(db.update(socialItems).set({ analysisStatus: "pending" }).where(eq(socialItems.id, source.id))).rejects.toThrow();
+    expect(await claimAnalysisJobs(10)).toHaveLength(0);
   });
 
   it("accepts an OAuth nonce once, including parallel replay attempts", async () => {

@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import type { HumanAssessment } from "@/lib/review-contract";
 import {
   boolean,
+  foreignKey,
   bigint,
   index,
   integer,
@@ -110,6 +111,10 @@ export const watchedVideos = pgTable("watched_videos", {
   id: uuid("id").defaultRandom().primaryKey(),
   platform: text("platform").notNull(),
   externalId: text("external_id").notNull(),
+  sourceKind: text("source_kind").notNull().default("video"),
+  channelId: uuid("channel_id"),
+  uploadsPlaylistId: text("uploads_playlist_id"),
+  analysisAfter: timestamp("analysis_after", { withTimezone: true }),
   url: text("url").notNull(),
   credentialConnectionId: uuid("credential_connection_id").references(() => socialConnections.id, { onDelete: "set null" }),
   apiKeyEncrypted: text("api_key_encrypted"),
@@ -134,6 +139,8 @@ export const watchedVideos = pgTable("watched_videos", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [uniqueIndex("watched_videos_platform_external_uidx").on(t.platform, t.externalId),
+  foreignKey({ columns: [t.channelId], foreignColumns: [t.id] }).onDelete("set null"),
+  index("watched_videos_channel_idx").on(t.channelId),
   index("watched_videos_queue_idx").on(t.availableAt, t.id).where(sql`${t.status} = 'active'`)]);
 
 /** One-time OAuth nonce storage prevents replay of an otherwise-valid signed state. */
@@ -179,6 +186,7 @@ export const socialItems = pgTable(
   {
     id: uuid("id").defaultRandom().primaryKey(),
     connectionId: uuid("connection_id").references(() => socialConnections.id, { onDelete: "set null" }),
+    analysisExcluded: boolean("analysis_excluded").notNull().default(false),
     platform: text("platform").notNull(),
     externalId: text("external_id").notNull(),
     parentExternalId: text("parent_external_id"),
@@ -333,6 +341,13 @@ export const metaSettings = pgTable("meta_settings", {
 export const aiPolicy = pgTable("ai_policy", {
   id: text("id").primaryKey(),
   settings: jsonb("settings").notNull(),
+  revision: integer("revision").notNull().default(1),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const youtubeSettings = pgTable("youtube_settings", {
+  id: text("id").primaryKey(),
+  apiKeyEncrypted: text("api_key_encrypted").notNull(),
   revision: integer("revision").notNull().default(1),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });

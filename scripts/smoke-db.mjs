@@ -32,6 +32,7 @@ try {
     "item_translations",
     "watched_videos",
     "ai_policy",
+    "youtube_settings",
   ];
 
   const tables = await sql`
@@ -55,12 +56,15 @@ try {
     where table_schema = 'public' and (table_name, column_name) in
     (('social_items', 'analysis_revision'), ('social_items', 'source_read_version'), ('social_items', 'source_checked_at'), ('social_items', 'source_unavailable_at'), ('alert_outbox', 'analysis_revision'), ('alert_outbox', 'dispatch_started_at'), ('alert_outbox', 'receiver_key'),
      ('social_analyses', 'triage_label'), ('item_translations', 'prompt_hash'), ('ai_policy', 'settings'), ('ai_policy', 'revision'),
-     ('watched_videos', 'provider'), ('watched_videos', 'progress_encrypted'), ('watched_videos', 'poll_minutes'), ('watched_videos', 'lock_id'))`;
-  assert(columns.length === 15, "source/analysis/dispatch/triage/policy/video columns eksik");
+     ('watched_videos', 'provider'), ('watched_videos', 'progress_encrypted'), ('watched_videos', 'poll_minutes'), ('watched_videos', 'lock_id'),
+     ('watched_videos', 'source_kind'), ('watched_videos', 'channel_id'), ('watched_videos', 'uploads_playlist_id'), ('watched_videos', 'analysis_after'), ('social_items', 'analysis_excluded'),
+     ('youtube_settings', 'api_key_encrypted'), ('youtube_settings', 'revision'))`;
+  assert(columns.length === 22, "source/analysis/dispatch/triage/policy/video/channel/settings columns eksik");
   const contracts = await sql`select conname from pg_constraint where contype = 'c' and convalidated
     and ((conrelid = 'public.social_analyses'::regclass and conname = 'social_analyses_triage_contract')
-      or (conrelid = 'public.watched_videos'::regclass and conname = 'watched_videos_apify_platform_check'))`;
-  assert(contracts.length === 2, "triage veya video provider CHECK contract eksik");
+      or (conrelid = 'public.watched_videos'::regclass and conname in ('watched_videos_apify_platform_check', 'watched_videos_source_kind_check', 'watched_videos_channel_child_check'))
+      or (conrelid = 'public.social_items'::regclass and conname = 'social_items_history_only_check'))`;
+  assert(contracts.length === 5, "triage/video/channel/history CHECK contract eksik");
 
   const [fk] = await sql`
     select rc.delete_rule
@@ -97,10 +101,11 @@ try {
         'item_review_events_item_idx',
         'item_translations_revision_uidx',
         'watched_videos_queue_idx',
-        'social_analyses_triage_idx'
+        'social_analyses_triage_idx',
+        'watched_videos_channel_idx'
       )
   `;
-  assert(indexes.length === 13, `beklenen kritik index sayısı 13, bulunan ${indexes.length}`);
+  assert(indexes.length === 14, `beklenen kritik index sayısı 14, bulunan ${indexes.length}`);
 
   const [connectionTargetsUnique] = await sql`
     select count(*)::int as count
