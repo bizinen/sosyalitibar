@@ -39,7 +39,6 @@ export async function SourceBrowser({ params, connections, selected = false }: {
     {!page.rows.length ? <div className="empty"><h3>Bu görünümde paylaşım yok.</h3><p>{params.sourceAfter ? "Liste değişmiş olabilir. İlk sayfaya dönüp yeniden ara." : "Aramayı veya hesap filtresini değiştir. Henüz kaynak eklemediysen izleme listesinden video ekleyebilirsin."}</p><Link className="btn" href={params.sourceAfter ? href({ mode: "sources", sourceAfter: undefined }) : "/settings/videos"}>{params.sourceAfter ? "İlk sayfaya dön" : "Video izleme listesi"}</Link></div> : null}
     <div className="source-grid">{page.rows.map((row) => {
       const platform = row.platform === "youtube" ? "YouTube" : row.platform === "instagram" ? "Instagram" : "Facebook";
-      const scan = row.scan ? sourceScanStatus(row.scan) : null;
       return <article className="source-tile" key={row.key}>
         <div className="source-tile-account"><span className={`review-platform ${row.platform}`}>{platform}</span><strong>{row.source_id === null ? "Kaynağı belirlenemeyen yorumlar" : row.channel || "Kanal bilgisi alınamadı"}</strong></div>
         <CommentSource raw={row.source_id === null ? { source_post: { text: "Paylaşımı belirlenemeyen yorumlar" } } : row.raw} platform={row.platform} rootId={row.source_id} titleHref={commentHref(row.key)} />
@@ -47,8 +46,6 @@ export async function SourceBrowser({ params, connections, selected = false }: {
           <Link href={commentHref(row.key, "pending")} prefetch={false}><strong>{row.pending.toLocaleString("tr-TR")}</strong> inceleme bekleyen</Link>
           <Link className={row.risk > 0 ? "source-risk" : undefined} href={commentHref(row.key, "risk")} prefetch={false}><strong>{row.risk.toLocaleString("tr-TR")}</strong> yüksek öncelik</Link></div>
           <p className="source-date small muted">{row.comments ? "Son yorum alımı" : "İzlemeye eklendi"}: {new Date(row.latest_at).toLocaleString("tr-TR", { timeZone: "Europe/Istanbul", day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })}</p>
-          <p className={scan?.warning ? "source-scan-note notice small" : "source-scan-note small muted"}>{scan ? <>{scan.label}. {scan.note}{row.scan?.lastSyncedAt ? ` Son tarama: ${new Date(row.scan.lastSyncedAt).toLocaleString("tr-TR", { timeZone: "Europe/Istanbul" })}.` : ""} <Link href="/settings/videos" className="text-link">Tarama ayarları</Link></> : !row.comments ? <>Henüz yorum alınmadı. Tarama durumunu <Link href="/settings/videos" className="text-link">izleme listesinde</Link> görebilirsin.</> : "Bu paylaşım için tarama kapsamı doğrulanmadı."}</p>
-          <p className="source-identity">{row.source_id ? `Paylaşım kimliği: ${row.source_id}` : "Kaynak paylaşımı bulunamayan yorumlar burada birlikte gösterilir."}</p>
           <Link className="btn" href={commentHref(row.key)} prefetch={false}>Yorumları incele</Link>
         </div>
       </article>;
