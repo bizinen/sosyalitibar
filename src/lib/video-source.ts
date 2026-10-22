@@ -8,6 +8,20 @@ export const videoScanSettingsSchema = z.object({
 
 export type VideoPlatform = "youtube" | "facebook" | "instagram";
 
+export function youtubeProfileImage(thumbnails: unknown): string | null {
+  const parsed = z.object({ medium: z.object({ url: z.string().max(2048) }).optional(),
+    high: z.object({ url: z.string().max(2048) }).optional(), default: z.object({ url: z.string().max(2048) }).optional() }).safeParse(thumbnails);
+  if (!parsed.success) return null;
+  for (const image of [parsed.data.medium, parsed.data.high, parsed.data.default]) {
+    try {
+      const url = new URL(image?.url ?? "");
+      if (url.protocol === "https:" && !url.username && !url.password && !url.port
+        && ["yt3.ggpht.com", "yt3.googleusercontent.com", "i.ytimg.com"].includes(url.hostname)) return image!.url;
+    } catch { /* Missing or invalid images use the channel initials. */ }
+  }
+  return null;
+}
+
 export function youtubeChannelReference(value: string): { id?: string; forHandle?: string; forUsername?: string } {
   const url = new URL(value);
   if (url.protocol !== "https:" || url.username || url.password || url.port || url.search || url.hash

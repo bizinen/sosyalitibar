@@ -58,8 +58,8 @@ try {
      ('social_analyses', 'triage_label'), ('item_translations', 'prompt_hash'), ('ai_policy', 'settings'), ('ai_policy', 'revision'),
      ('watched_videos', 'provider'), ('watched_videos', 'progress_encrypted'), ('watched_videos', 'poll_minutes'), ('watched_videos', 'lock_id'),
      ('watched_videos', 'source_kind'), ('watched_videos', 'channel_id'), ('watched_videos', 'uploads_playlist_id'), ('watched_videos', 'analysis_after'), ('social_items', 'analysis_excluded'),
-     ('youtube_settings', 'api_key_encrypted'), ('youtube_settings', 'revision'))`;
-  assert(columns.length === 22, "source/analysis/dispatch/triage/policy/video/channel/settings columns eksik");
+     ('youtube_settings', 'api_key_encrypted'), ('youtube_settings', 'revision'), ('watched_videos', 'profile_image_url'), ('watched_videos', 'metadata_checked_at'))`;
+  assert(columns.length === 24, "source/analysis/dispatch/triage/policy/video/channel/settings columns eksik");
   const contracts = await sql`select conname from pg_constraint where contype = 'c' and convalidated
     and ((conrelid = 'public.social_analyses'::regclass and conname = 'social_analyses_triage_contract')
       or (conrelid = 'public.watched_videos'::regclass and conname in ('watched_videos_apify_platform_check', 'watched_videos_source_kind_check', 'watched_videos_channel_child_check'))

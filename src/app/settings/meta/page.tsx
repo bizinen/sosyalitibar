@@ -23,8 +23,12 @@ export default async function MetaSettingsPage() {
   const cfg = await getLlmSettings();
   const channels = await db.select({ id: watchedVideos.id, title: watchedVideos.title, url: watchedVideos.url, status: watchedVideos.status,
     revision: watchedVideos.revision, analysisAfter: watchedVideos.analysisAfter, lastSyncedAt: watchedVideos.lastSyncedAt, lastError: watchedVideos.lastError,
+    profileImageUrl: watchedVideos.profileImageUrl,
     continuing: sql<boolean>`${watchedVideos.progressEncrypted} is not null`,
     count: sql<number>`(select count(*)::int from watched_videos child where child.channel_id = watched_videos.id and child.status <> 'removed')`,
+    scannedCount: sql<number>`(select count(*)::int from watched_videos child where child.channel_id = watched_videos.id and child.status <> 'removed' and child.last_synced_at is not null)`,
+    blockedCount: sql<number>`(select count(*)::int from watched_videos child where child.channel_id = watched_videos.id and child.status = 'blocked')`,
+    lastCommentScan: sql<number | null>`(select (extract(epoch from max(child.last_synced_at)) * 1000)::float8 from watched_videos child where child.channel_id = watched_videos.id and child.status <> 'removed')`,
   }).from(watchedVideos).where(and(eq(watchedVideos.sourceKind, "channel"), ne(watchedVideos.status, "removed"))).orderBy(desc(watchedVideos.createdAt));
   const youtubeKey = await getYouTubeSettings();
   const metaCfg = await getMetaSettings();

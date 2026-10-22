@@ -36,3 +36,21 @@ it("keeps channel creation out of the list and does not claim a blocked channel 
   expect(html).not.toContain('name="youtubeChannelUrl"');
   expect(html).not.toContain("otomatik takip edilir");
 });
+
+it("shows actual channel identity and scan coverage without equating discovered videos with collected comments", () => {
+  const html = renderToStaticMarkup(createElement(YouTubeChannels, { mode: "list", hasKey: true, channels: [{ id: "fixture", title: "Dr. Örnek Kanal", url: "https://youtube.com/@kanal", status: "active", revision: 1, count: 394, scannedCount: 120, blockedCount: 3, profileImageUrl: "https://yt3.ggpht.com/profile", analysisAfter: null, lastSyncedAt: null, lastCommentScan: null, continuing: false, lastError: null }] }));
+  expect(html).toContain('src="https://yt3.ggpht.com/profile"');
+  expect(html).toContain('value="120" max="394"');
+  expect(html).toContain("İlk taraması tamamlanan");
+  expect(html).toContain("3 videonun yorumları alınamadı");
+  expect(html).toContain("Henüz tamamlanmadı");
+});
+
+it("does not round an unfinished channel scan up to 100 percent", () => {
+  const channel = { id: "fixture", title: "Kanal", url: "https://youtube.com/@kanal", status: "active", revision: 1, count: 394, scannedCount: 393, blockedCount: 1, analysisAfter: null, lastSyncedAt: null, continuing: false, lastError: null };
+  const html = renderToStaticMarkup(createElement(AccountsWorkspace, { accounts: [], channels: [channel], targets: [], metaConnectUrl: null, hasYouTubeKey: true, checkedAt: 0 }));
+  expect(html).toContain("99% ·");
+  expect(html).not.toContain("100% ·");
+  expect(html).toContain("Kontrol gereken<span>1</span>");
+  expect(html).not.toContain('<img');
+});

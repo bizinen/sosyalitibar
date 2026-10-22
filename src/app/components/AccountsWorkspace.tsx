@@ -26,7 +26,7 @@ export function AccountsWorkspace({ accounts, channels, targets, metaConnectUrl,
   function closeAdd() { if (!addBusy) { setAddOpen(false); setAddPlatform(""); } }
   const enabled = new Set(targets.filter(target => target.enabled).map(target => target.id));
   const attention = (account: Account) => Boolean(accountAttention(account, enabled, checkedAt));
-  const channelAttention = (channel: Channel) => channel.status !== "paused" && (channel.status === "blocked" || Boolean(channel.lastError));
+  const channelAttention = (channel: Channel) => channel.status !== "paused" && (channel.status === "blocked" || Boolean(channel.lastError) || Boolean(channel.blockedCount));
   const counts = { all: accounts.length + channels.length,
     active: accounts.filter(account => account.status === "active").length + channels.filter(channel => channel.status === "active").length,
     attention: accounts.filter(attention).length + channels.filter(channelAttention).length,

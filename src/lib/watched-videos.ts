@@ -11,7 +11,7 @@ import { env } from "@/lib/config";
 import { getYouTubeSettings } from "@/lib/youtube-settings";
 import { getFacebookPost, getFacebookComments, getFacebookReplies, getInstagramMediaItem, getInstagramComments,
   getInstagramReplies, graphGet, graphGetAbsolute, MetaApiError } from "@/lib/meta";
-import { videoSource } from "@/lib/video-source";
+import { videoSource, youtubeProfileImage } from "@/lib/video-source";
 import { ApifySourceError, collectApifyVideo } from "@/lib/apify-videos";
 
 const progressSchema = z.object({ phase: z.enum(["comments", "replies"]), token: z.string().max(16384).nullable(),
@@ -111,6 +111,20 @@ async function collectVideo(video: Video, lockId: string) {
         contentDetails: z.object({ videoPublishedAt: z.string().datetime().optional() }).optional(),
       })).max(50) }).parse(await youtubeGet("playlistItems", key, { part: "snippet,contentDetails", playlistId: video.uploadsPlaylistId!, maxResults: "50",
         ...(progress.token && !refreshHead ? { pageToken: progress.token } : {}) }));
+      let metadata: { metadataCheckedAt?: Date; profileImageUrl?: string | null; title?: string; channelName?: string } = {};
+      if (!video.metadataCheckedAt || Date.now() - video.metadataCheckedAt.getTime() >= 86400000) {
+        metadata = { metadataCheckedAt: new Date() };
+        try {
+          const result = z.object({ items: z.array(z.object({ id: z.string(), snippet: z.object({ title: z.string().max(500),
+            thumbnails: z.unknown().optional() }) })).max(1) }).parse(await youtubeGet("channels", key, { id: video.externalId, part: "snippet" }));
+          const profile = result.items[0];
+          if (profile?.id === video.externalId) metadata = { ...metadata, title: profile.snippet.title,
+            channelName: profile.snippet.title, profileImageUrl: youtubeProfileImage(profile.snippet.thumbnails) };
+        } catch (error) {
+          if (error instanceof Error && error.message === "youtube_quota_exceeded") throw error;
+          // Optional profile refresh must not stop comment collection or discard the cached image.
+        }
+      }
       await db.transaction(async (tx) => {
         const [channel] = await tx.select({ id: watchedVideos.id }).from(watchedVideos).where(owned).for("update");
         if (!channel) throw new SourceError("source_lease_lost");
@@ -125,7 +139,7 @@ async function collectVideo(video: Video, lockId: string) {
         }
         const next = refreshHead ? { ...progress, headCheckedAt: Date.now() } : page.nextPageToken
           ? { token: page.nextPageToken, seen: [...progress.seen, pageKey], headCheckedAt: progress.token ? progress.headCheckedAt : Date.now() } : null;
-        await tx.update(watchedVideos).set({ progressEncrypted: next ? encryptSecret(JSON.stringify(next)) : null,
+        await tx.update(watchedVideos).set({ ...metadata, progressEncrypted: next ? encryptSecret(JSON.stringify(next)) : null,
           lockId: null, lockedAt: null, attempts: 0, lastError: null, updatedAt: new Date(),
           availableAt: new Date(Date.now() + (next ? 15000 : 15 * 60000)), ...(!next ? { lastSyncedAt: new Date() } : {}),
         }).where(owned);

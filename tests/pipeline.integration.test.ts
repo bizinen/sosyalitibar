@@ -805,7 +805,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
 
   it("adds a channel through the account API with encrypted credentials and an immutable history cutoff", async () => {
     const id = `UC${"a".repeat(22)}`;
-    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ items: [{ id, snippet: { title: "Kanal" }, contentDetails: { relatedPlaylists: { uploads: "uploads-fixture" } } }] })));
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ items: [{ id, snippet: { title: "Kanal", thumbnails: { medium: { url: "https://yt3.ggpht.com/profile" } } }, contentDetails: { relatedPlaylists: { uploads: "uploads-fixture" } } }] })));
     expect((await addYouTubeChannel(request({ url: "https://www.youtube.com/@kanal", apiKey: "fixture-key" }))).status).toBe(400);
     expect((await addYouTubeChannel(request({ url: "https://www.youtube.com/@kanal" }))).status).toBe(400);
     expect((await saveYouTubeSettings(request({ apiKey: "fixture-key", revision: 0 }))).status).toBe(200);
@@ -814,6 +814,8 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
     expect(channel).toMatchObject({ sourceKind: "channel", externalId: id, status: "active" });
     expect(channel!.analysisAfter).toBeInstanceOf(Date);
     expect(channel!.apiKeyEncrypted).toBeNull();
+    expect(channel!.profileImageUrl).toBe("https://yt3.ggpht.com/profile");
+    expect(channel!.metadataCheckedAt).toBeInstanceOf(Date);
     expect(decryptSecret((await db.query.youtubeSettings.findFirst())!.apiKeyEncrypted)).toBe("fixture-key");
     expect((await addYouTubeChannel(request({ url: "https://www.youtube.com/@kanal" }))).status).toBe(409);
     expect((await addYouTubeChannel(request({ url: "https://youtube.com.evil.test/@kanal" }))).status).toBe(400);
@@ -858,9 +860,45 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
     expect((await db.query.youtubeSettings.findFirst())!.revision).toBe(2);
   });
 
+  it.each([false, true])("caches a daily channel profile refresh and keeps discovery running when optional metadata fails: %s", async failed => {
+    const [channel] = await db.insert(watchedVideos).values({ platform: "youtube", sourceKind: "channel", externalId: `UC${"a".repeat(22)}`,
+      url: "https://www.youtube.com/@kanal", uploadsPlaylistId: "uploads-fixture", analysisAfter: new Date(), apiKeyEncrypted: encryptSecret("fixture-key"),
+      profileImageUrl: "https://yt3.ggpht.com/old", metadataCheckedAt: new Date("2020-01-01") }).returning();
+    const fetchMock = vi.fn(async (input: string) => {
+      if (new URL(input).pathname.endsWith("/channels")) {
+        if (failed) return Response.json({}, { status: 503 });
+        return Response.json({ items: [{ id: channel!.externalId, snippet: { title: "Güncel kanal", thumbnails: { medium: { url: "https://yt3.ggpht.com/new" } } } }] });
+      }
+      return Response.json({ items: [] });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    expect((await collectWatchedVideos())[0]).toMatchObject({ completed: true });
+    const saved = await db.query.watchedVideos.findFirst();
+    expect(saved!.profileImageUrl).toBe(`https://yt3.ggpht.com/${failed ? "old" : "new"}`);
+    expect(saved!.metadataCheckedAt!.getTime()).toBeGreaterThan(Date.now() - 10000);
+    expect(saved!.lastError).toBeNull();
+    await db.update(watchedVideos).set({ availableAt: new Date("2020-01-01") }).where(eq(watchedVideos.id, channel!.id));
+    expect((await collectWatchedVideos())[0]).toMatchObject({ completed: true });
+    expect(fetchMock.mock.calls.filter(([input]) => new URL(input).pathname.endsWith("/channels"))).toHaveLength(1);
+  });
+
+  it("does not save optional profile metadata after the channel is paused during refresh", async () => {
+    const [channel] = await db.insert(watchedVideos).values({ platform: "youtube", sourceKind: "channel", externalId: `UC${"a".repeat(22)}`,
+      url: "https://www.youtube.com/@kanal", uploadsPlaylistId: "uploads-fixture", analysisAfter: new Date(), apiKeyEncrypted: encryptSecret("fixture-key") }).returning();
+    vi.stubGlobal("fetch", vi.fn(async (input: string) => {
+      if (new URL(input).pathname.endsWith("/channels")) {
+        await configureVideo(request({ action: "pause", revision: 1 }), params(channel!.id));
+        return Response.json({ items: [{ id: channel!.externalId, snippet: { title: "Güncel kanal", thumbnails: { medium: { url: "https://yt3.ggpht.com/new" } } } }] });
+      }
+      return Response.json({ items: [] });
+    }));
+    await collectWatchedVideos();
+    expect(await db.query.watchedVideos.findFirst()).toMatchObject({ status: "paused", profileImageUrl: null, metadataCheckedAt: null });
+  });
+
   it("keeps comment collection moving while multiple channel archives remain due", async () => {
     await saveYouTubeSettings(request({ apiKey: "central-key", revision: 0 }));
-    const channels = await db.insert(watchedVideos).values(["a", "b"].map(letter => ({ platform: "youtube", sourceKind: "channel", externalId: `UC${letter.repeat(22)}`,
+    const channels = await db.insert(watchedVideos).values(["a", "b"].map(letter => ({ platform: "youtube", sourceKind: "channel", metadataCheckedAt: new Date(), externalId: `UC${letter.repeat(22)}`,
       url: `https://www.youtube.com/@${letter}`, uploadsPlaylistId: `uploads-${letter}`, analysisAfter: new Date(), availableAt: new Date("2020-01-01") }))).returning();
     const [video] = await db.insert(watchedVideos).values({ platform: "youtube", externalId: "dQw4w9WgXcQ", url: "https://youtu.be/dQw4w9WgXcQ",
       channelId: channels[0]!.id, analysisAfter: channels[0]!.analysisAfter }).returning();
@@ -876,7 +914,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
   });
 
   it("discovers every playlist page without overriding existing video pauses or exposing channel rows as posts", async () => {
-    const [channel] = await db.insert(watchedVideos).values({ platform: "youtube", sourceKind: "channel", externalId: `UC${"a".repeat(22)}`,
+    const [channel] = await db.insert(watchedVideos).values({ platform: "youtube", sourceKind: "channel", metadataCheckedAt: new Date(), externalId: `UC${"a".repeat(22)}`,
       url: "https://www.youtube.com/@kanal", uploadsPlaylistId: "uploads-fixture", analysisAfter: new Date(), apiKeyEncrypted: encryptSecret("fixture-key") }).returning();
     await db.insert(watchedVideos).values({ platform: "youtube", externalId: "dQw4w9WgXcQ", url: "https://youtu.be/dQw4w9WgXcQ", status: "paused" });
     vi.stubGlobal("fetch", vi.fn(async (input: string) => {
@@ -900,7 +938,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
 
   it("archives historical comments and replies while analyzing only comments created after channel tracking", async () => {
     const cutoff = new Date("2026-10-22T00:00:00Z");
-    const [channel] = await db.insert(watchedVideos).values({ platform: "youtube", sourceKind: "channel", externalId: `UC${"a".repeat(22)}`,
+    const [channel] = await db.insert(watchedVideos).values({ platform: "youtube", sourceKind: "channel", metadataCheckedAt: new Date(), externalId: `UC${"a".repeat(22)}`,
       url: "https://www.youtube.com/@kanal", uploadsPlaylistId: "uploads-fixture", analysisAfter: cutoff,
       availableAt: new Date("2100-01-01"), apiKeyEncrypted: encryptSecret("fixture-key") }).returning();
     await db.insert(watchedVideos).values({ platform: "youtube", externalId: "dQw4w9WgXcQ", url: "https://youtu.be/dQw4w9WgXcQ", channelId: channel!.id, analysisAfter: cutoff });
@@ -929,7 +967,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
   });
 
   it("does not write discovered videos after a concurrent channel pause and preserves history on removal", async () => {
-    const [channel] = await db.insert(watchedVideos).values({ platform: "youtube", sourceKind: "channel", externalId: `UC${"a".repeat(22)}`,
+    const [channel] = await db.insert(watchedVideos).values({ platform: "youtube", sourceKind: "channel", metadataCheckedAt: new Date(), externalId: `UC${"a".repeat(22)}`,
       url: "https://www.youtube.com/@kanal", uploadsPlaylistId: "uploads-fixture", analysisAfter: new Date(), apiKeyEncrypted: encryptSecret("fixture-key") }).returning();
     const entered = deferred<void>(), release = deferred<Response>();
     vi.stubGlobal("fetch", vi.fn(() => { entered.resolve(); return release.promise; }));
@@ -948,7 +986,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
   });
 
   it("persists the channel discovery cursor during quota exhaustion and resumes the same page", async () => {
-    const [channel] = await db.insert(watchedVideos).values({ platform: "youtube", sourceKind: "channel", externalId: `UC${"a".repeat(22)}`,
+    const [channel] = await db.insert(watchedVideos).values({ platform: "youtube", sourceKind: "channel", metadataCheckedAt: new Date(), externalId: `UC${"a".repeat(22)}`,
       url: "https://www.youtube.com/@kanal", uploadsPlaylistId: "uploads-fixture", analysisAfter: new Date(), apiKeyEncrypted: encryptSecret("fixture-key") }).returning();
     const fetchMock = vi.fn().mockResolvedValueOnce(Response.json({ items: [], nextPageToken: "page-2" }))
       .mockResolvedValueOnce(Response.json({ error: { errors: [{ reason: "quotaExceeded" }] } }, { status: 403 }))
@@ -967,7 +1005,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
   });
 
   it("blocks repeated channel discovery cursors instead of looping forever", async () => {
-    const [channel] = await db.insert(watchedVideos).values({ platform: "youtube", sourceKind: "channel", externalId: `UC${"a".repeat(22)}`,
+    const [channel] = await db.insert(watchedVideos).values({ platform: "youtube", sourceKind: "channel", metadataCheckedAt: new Date(), externalId: `UC${"a".repeat(22)}`,
       url: "https://www.youtube.com/@kanal", uploadsPlaylistId: "uploads-fixture", analysisAfter: new Date(), apiKeyEncrypted: encryptSecret("fixture-key") }).returning();
     const fetchMock = vi.fn(async () => Response.json({ items: [], nextPageToken: "same-page" })); vi.stubGlobal("fetch", fetchMock);
     for (let run = 0; run < 3; run++) {
@@ -979,7 +1017,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
   });
 
   it("checks recent uploads during a long archive discovery without losing its older-page cursor", async () => {
-    const [channel] = await db.insert(watchedVideos).values({ platform: "youtube", sourceKind: "channel", externalId: `UC${"a".repeat(22)}`,
+    const [channel] = await db.insert(watchedVideos).values({ platform: "youtube", sourceKind: "channel", metadataCheckedAt: new Date(), externalId: `UC${"a".repeat(22)}`,
       url: "https://www.youtube.com/@kanal", uploadsPlaylistId: "uploads-fixture", analysisAfter: new Date(), apiKeyEncrypted: encryptSecret("fixture-key"),
       progressEncrypted: encryptSecret(JSON.stringify({ token: "archive-page", seen: [], headCheckedAt: 0 })) }).returning();
     const fetchMock = vi.fn().mockResolvedValueOnce(Response.json({ items: [{ snippet: { title: "Yeni video", resourceId: { videoId: "dQw4w9WgXcQ" } } }], nextPageToken: "head-page-2" }))
