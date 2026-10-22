@@ -851,6 +851,49 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
     expect((await purgeSource(request({ confirm: "delete_source", revision: null }), { params: Promise.resolve({ key: sourceKey("facebook", null) }) })).status).toBe(400);
   });
 
+  it("requeues only failed official videos of the selected channel without duplicate scheduling or history loss", async () => {
+    const channels = await db.insert(watchedVideos).values(["selected", "other"].map(name => ({ platform: "youtube", sourceKind: "channel", externalId: `UC${(name === "selected" ? "a" : "b").repeat(22)}`, url: `https://www.youtube.com/@${name}`, uploadsPlaylistId: "uploads-fixture", analysisAfter: new Date("2026-01-01") }))).returning();
+    const channel = channels[0]!; const cutoff = new Date("2026-01-01");
+    const children = await db.insert(watchedVideos).values([
+      { platform: "youtube", channelId: channel.id, externalId: "failed-1", url: "fixture", status: "blocked", revision: 3, attempts: 8, lastError: "source_pagination_stalled", progressEncrypted: encryptSecret("old checkpoint"), analysisAfter: cutoff },
+      { platform: "youtube", channelId: channel.id, externalId: "failed-2", url: "fixture", status: "blocked", analysisAfter: cutoff },
+      { platform: "youtube", channelId: channel.id, externalId: "completed", url: "fixture", status: "active", lastSyncedAt: cutoff },
+      { platform: "youtube", channelId: channel.id, externalId: "waiting", url: "fixture", status: "active" },
+      { platform: "youtube", channelId: channel.id, externalId: "paused", url: "fixture", status: "paused" },
+      { platform: "youtube", channelId: channel.id, externalId: "removed", url: "fixture", status: "removed", purgedAt: cutoff },
+      { platform: "youtube", channelId: channels[1]!.id, externalId: "other-channel", url: "fixture", status: "blocked" },
+    ].map(child => ({ ...child, analysisAfter: cutoff }))).returning();
+    const saved = (await upsertSocialItem({ platform: "youtube", externalId: "saved-history", rootExternalId: "failed-1", text: "history", analysisExcluded: true })).item!;
+    expect((await configureVideo(request({ action: "retry_failed", revision: 2 }), params(channel.id))).status).toBe(409);
+    const responses = await Promise.all([1, 2].map(() => configureVideo(request({ action: "retry_failed", revision: 1 }), params(channel.id))));
+    expect(responses.every(response => response.status === 200)).toBe(true);
+    const results = await Promise.all(responses.map(response => response.json()));
+    expect(results.map(body => body.queued).sort()).toEqual([0, 2]);
+    const updated = await db.select().from(watchedVideos).where(eq(watchedVideos.channelId, channel.id));
+    expect(updated.find(row => row.externalId === "failed-1")).toMatchObject({ status: "active", revision: 4, attempts: 0, lastError: null, progressEncrypted: null, lockId: null, analysisAfter: cutoff });
+    expect(updated.find(row => row.externalId === "failed-2")).toMatchObject({ status: "active", revision: 2, analysisAfter: cutoff });
+    for (const child of children.slice(2)) expect(await db.query.watchedVideos.findFirst({ where: eq(watchedVideos.id, child.id) })).toEqual(child);
+    expect(await db.query.socialItems.findFirst({ where: eq(socialItems.id, saved.id) })).toMatchObject({ text: "history", analysisExcluded: true, analysisStatus: "complete" });
+    const audits = await db.select().from(auditLogs).where(eq(auditLogs.action, "youtube_channel.retry_failed_videos"));
+    expect(audits).toHaveLength(1); expect(audits[0]!.metadata).toEqual({ count: 2 });
+    expect(fetch).not.toHaveBeenCalled(); expect(mocks.analyze).not.toHaveBeenCalled();
+  });
+
+  it("rejects channel failure retries while paused or blocked and never resumes the channel implicitly", async () => {
+    const [channel] = await db.insert(watchedVideos).values({ platform: "youtube", sourceKind: "channel", externalId: `UC${"c".repeat(22)}`, url: "fixture", uploadsPlaylistId: "uploads-fixture", analysisAfter: new Date("2026-01-01"), status: "paused" }).returning();
+    const [child] = await db.insert(watchedVideos).values({ platform: "youtube", channelId: channel!.id, externalId: "failed-child", url: "fixture", analysisAfter: new Date("2026-01-01"), status: "blocked" }).returning();
+    for (const status of ["paused", "blocked"]) {
+      await db.update(watchedVideos).set({ status }).where(eq(watchedVideos.id, channel!.id));
+      const response = await configureVideo(request({ action: "retry_failed", revision: 1 }), params(channel!.id));
+      expect(response.status).toBe(409); expect(await response.json()).toMatchObject({ error: "channel_paused" });
+      expect((await db.query.watchedVideos.findFirst({ where: eq(watchedVideos.id, channel!.id) }))?.status).toBe(status);
+    }
+    expect(await db.query.watchedVideos.findFirst({ where: eq(watchedVideos.id, child!.id) })).toEqual(child);
+    expect((await configureVideo(request({ action: "retry_failed", revision: 1 }), params(child!.id))).status).toBe(409);
+    expect((await configureVideo(new Request("http://localhost:3000/api/test", { method: "PATCH", headers: { origin: "https://evil.test" } }), params(channel!.id))).status).toBe(403);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("edits scan limits without deleting history, resuming a pause or replacing a running scan", async () => {
     const [video] = await db.insert(watchedVideos).values({ platform: "instagram", provider: "apify", externalId: "public:instagram:AuditPost",
       url: "https://www.instagram.com/p/AuditPost", status: "paused", lastSyncedAt: new Date(), availableAt: new Date(Date.now() + 3600000) }).returning();
