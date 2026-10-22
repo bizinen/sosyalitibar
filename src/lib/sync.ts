@@ -60,6 +60,22 @@ const syncTaskSchema = z.object({
 });
 const syncProgressSchema = z.object({ tasks: z.array(syncTaskSchema), deadTasks: z.array(syncTaskSchema).default([]) });
 
+export async function removeSourceSyncState(tx: Transaction, platform: string, sourceId: string, itemIds: Set<string>) {
+  const connections = await tx.select().from(socialConnections).where(and(eq(socialConnections.platform, platform),
+    sql`${socialConnections.syncState}->>'continuation' is not null`)).orderBy(asc(socialConnections.id)).for("update");
+  for (const connection of connections) {
+    const saved = syncProgressSchema.parse(JSON.parse(decryptSecret(String(connection.syncState.continuation))));
+    const clean = (tasks: z.infer<typeof syncTaskSchema>[]) => tasks.filter(task => task.root?.id !== sourceId && task.parent?.id !== sourceId)
+      .map(task => ({ ...task, page: { ...task.page, data: task.page.data.filter(record => record.id !== sourceId && !itemIds.has(record.id)) } }));
+    const next = { tasks: clean(saved.tasks), deadTasks: clean(saved.deadTasks) };
+    if (JSON.stringify(saved) === JSON.stringify(next)) continue;
+    await tx.update(socialConnections).set({ syncLockId: null, syncLockedAt: null,
+      syncState: { ...connection.syncState, continuation: next.tasks.length || next.deadTasks.length ? encryptSecret(JSON.stringify(next)) : null,
+        syncPending: next.tasks.length, syncDead: next.deadTasks.length, syncRetryAt: null }, updatedAt: new Date(),
+    }).where(eq(socialConnections.id, connection.id));
+  }
+}
+
 function parseDate(value?: string): Date | null {
   if (!value) return null;
   const date = new Date(value);

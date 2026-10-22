@@ -67,7 +67,7 @@ export async function commentSources(p: CommentParams, selected = false) {
         coalesce(g.comments, 0) as comments, coalesce(g.pending, 0) as pending, coalesce(g.risk, 0) as risk,
         coalesce(g.latest_at, v.created_at) as latest_at,
         c.id as connection_id,
-        case when v.id is not null then jsonb_build_object('id', v.id, 'revision', v.revision, 'status', v.status, 'provider', v.provider,
+        case when control.id is not null then jsonb_build_object('id', control.id, 'revision', control.revision, 'status', control.status, 'provider', control.provider,
           'channelPaused', coalesce(channel.status <> 'active', false), 'running', coalesce(v.locked_at > now() - interval '3 minutes', false),
           'continuing', v.progress_encrypted is not null) else null end as watch,
         case when v.external_id is not null then jsonb_build_object(
@@ -94,6 +94,7 @@ export async function commentSources(p: CommentParams, selected = false) {
           ${platform ? sql`and platform = ${platform}` : sql``}
           ${source ? source.id === null ? sql`and false` : sql`and external_id = ${source.id}` : sql``}
       ) v on v.platform = g.platform and v.external_id = g.source_id
+      left join watched_videos control on control.platform = coalesce(g.platform, v.platform) and control.external_id = coalesce(g.source_id, v.external_id)
       left join watched_videos channel on channel.id = v.channel_id
       left join lateral (
         select i.raw, i.connection_id from social_items i

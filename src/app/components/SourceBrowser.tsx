@@ -52,7 +52,7 @@ export async function SourceBrowser({ params, connections, selected = false }: {
           <Link href={commentHref(row.key, "pending")} prefetch={false}><strong>{row.pending.toLocaleString("tr-TR")}</strong> inceleme bekleyen</Link>
           <Link className={row.risk > 0 ? "source-risk" : undefined} href={commentHref(row.key, "risk")} prefetch={false}><strong>{row.risk.toLocaleString("tr-TR")}</strong> yüksek öncelik</Link></div>
           <p className="source-date small muted">{row.comments ? "Son yorum alımı" : "İzlemeye eklendi"}: {new Date(row.latest_at).toLocaleString("tr-TR", { timeZone: "Europe/Istanbul", day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })}</p>
-          <SourceCardActions title={row.title?.split("\n")[0]?.slice(0, 500) || "Bu paylaşım"} commentsHref={commentHref(row.key)} permalink={row.raw.source_post.permalink} watch={row.watch}
+          <SourceCardActions title={row.title?.split("\n")[0]?.slice(0, 500) || "Bu paylaşım"} commentsHref={commentHref(row.key)} permalink={row.raw.source_post.permalink} watch={row.watch} sourceKey={row.source_id ? row.key : undefined} commentsCount={row.comments}
             settingsHref={row.watch ? `/settings/videos?video=${row.watch.id}#video-${row.watch.id}` : row.connection_id ? "/settings/meta" : "/settings/videos"} />
         </div>
       </article>;

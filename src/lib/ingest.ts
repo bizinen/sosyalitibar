@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { and, asc, eq, inArray, isNull, lte, sql } from "drizzle-orm";
 import { db, type Transaction } from "@/lib/db";
-import { alertOutbox, connectionTargets, monitoringTargets, socialAnalyses, socialConnections, socialItems } from "@/db/schema";
+import { alertOutbox, connectionTargets, monitoringTargets, socialAnalyses, socialConnections, socialItems, watchedVideos } from "@/db/schema";
 import { analyzeComment, type AnalyzeCommentInput, type LlmResult } from "@/lib/llm";
 import { createBatchAnalyzer, type TriageResult } from "@/lib/batch-triage";
 import type { getLlmSettings } from "@/lib/llm-settings";
@@ -51,6 +51,13 @@ export async function upsertSocialItem(input: SocialItemInput, assertOwnership?:
   if (!Number.isSafeInteger(sourceReadVersion) || sourceReadVersion < 1) throw new Error("source read version invalid");
   return db.transaction(async (tx) => {
     await lockAnalysisContext(tx, true);
+    if (input.rootExternalId) {
+      const [removed] = await tx.select({ id: watchedVideos.id }).from(watchedVideos).where(and(
+        eq(watchedVideos.platform, input.platform), eq(watchedVideos.externalId, input.rootExternalId),
+        eq(watchedVideos.status, "removed"), sql`${watchedVideos.purgedAt} is not null`,
+      ));
+      if (removed) return { item: null, created: false, changed: false, suppressed: true };
+    }
     await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${input.platform}), hashtext(${input.externalId}))`);
     const [existing] = await tx.select().from(socialItems).where(and(
       eq(socialItems.platform, input.platform), eq(socialItems.externalId, input.externalId),
