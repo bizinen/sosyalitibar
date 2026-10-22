@@ -26,6 +26,7 @@ import { commentRows, sourceKey } from "@/lib/comment-feed";
 import { commentSources } from "@/lib/comment-sources";
 import { PUT as saveMetaSettings } from "@/app/api/settings/meta/route";
 import { GET as oauthCallback } from "@/app/api/meta/callback/route";
+import { POST as pollUpdates, GET as pollLegacyUpdates } from "@/app/api/items/updates/route";
 import * as auditModule from "@/lib/audit";
 import { POST as retryDeadAnalysis } from "@/app/api/admin/dead-letter/analysis/[id]/route";
 
@@ -681,6 +682,25 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
     const responses = await Promise.all([retryDeadAnalysis(request(), params(source.id)), retryDeadAnalysis(request(), params(source.id))]);
     expect(responses.map((response) => response.status).sort()).toEqual([200, 409]);
     expect(await db.query.socialItems.findFirst({ where: eq(socialItems.id, source.id) })).toMatchObject({ analysisStatus: "pending", analysisRevision: 2 });
+  });
+
+  it("polls older loaded comments in bounded POST batches and rejects unsafe requests", async () => {
+    const rows = await db.insert(socialItems).values(Array.from({ length: 1005 }, (_, index) => ({
+      platform: "youtube", externalId: `loaded-${index}`, text: "sentetik",
+    }))).returning();
+    const after = encodeItemCursor({ at: new Date("2100-01-01"), id: rows[0]!.id });
+    const make = (ids: string[], origin = "http://localhost:3000") => new Request("http://localhost:3000/api/items/updates", {
+      method: "POST", headers: { origin, "content-type": "application/json" }, body: JSON.stringify({ after, ids }),
+    });
+    const first = await pollUpdates(make(rows.slice(0, 1000).map((row) => row.id)));
+    expect(first.status).toBe(200); expect((await first.json()).updates).toHaveLength(1000);
+    await db.update(socialItems).set({ reviewStatus: "reviewed" }).where(eq(socialItems.id, rows[1004]!.id));
+    const tail = await (await pollUpdates(make(rows.slice(1000).map((row) => row.id)))).json();
+    expect(tail.updates.find((row: { id: string }) => row.id === rows[1004]!.id).reviewStatus).toBe("reviewed");
+    expect((await pollUpdates(make(rows.map((row) => row.id)))).status).toBe(400);
+    expect((await pollUpdates(make([], "https://evil.test"))).status).toBe(403);
+    expect((await pollUpdates(request({ after, ids: [], extra: "x".repeat(65536) }))).status).toBe(400);
+    expect((await pollLegacyUpdates(new Request(`http://localhost:3000/api/items/updates?after=${after}&ids=${rows[0]!.id}`))).status).toBe(200);
   });
 
   it("accepts an OAuth nonce once, including parallel replay attempts", async () => {
