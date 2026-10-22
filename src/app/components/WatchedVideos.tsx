@@ -31,8 +31,8 @@ function sourceError(code: string) {
   return errors[code] ?? "Yorumlar alınamadı. Kaynak bağlantısını kontrol edip tekrar dene.";
 }
 
-export function WatchedVideos({ videos, connections, hasYouTubeKey, hasApifyKey }: { videos: Video[];
-  connections: { id: string; name: string; platform: string }[]; hasYouTubeKey: boolean; hasApifyKey: boolean }) {
+export function WatchedVideos({ videos, connections, hasYouTubeKey, hasApifyKey, checkedAt }: { videos: Video[];
+  connections: { id: string; name: string; platform: string }[]; hasYouTubeKey: boolean; hasApifyKey: boolean; checkedAt: number }) {
   const router = useRouter();
   const [platform, setPlatform] = useState<VideoPlatform>("youtube");
   const [url, setUrl] = useState("");
@@ -50,7 +50,8 @@ export function WatchedVideos({ videos, connections, hasYouTubeKey, hasApifyKey 
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
-  useEffect(() => { const timer = setInterval(() => { if (!document.hidden) router.refresh(); }, 30000); return () => clearInterval(timer); }, [router]);
+  const [now, setNow] = useState(checkedAt);
+  useEffect(() => { const timer = setInterval(() => { setNow(Date.now()); if (!document.hidden) router.refresh(); }, 30000); return () => clearInterval(timer); }, [router]);
   async function add(event: FormEvent) {
     event.preventDefault(); setBusy("add"); setError(""); setMessage("");
     try {
@@ -109,7 +110,7 @@ export function WatchedVideos({ videos, connections, hasYouTubeKey, hasApifyKey 
     {message ? <p className="small" role="status">{message}</p> : null}
     <div className="feed-head"><h2>İzleme listesi <span className="badge">{videos.length}</span></h2><button className="btn" disabled={busy !== null} onClick={() => router.refresh()}>Yenile</button></div>
     {videos.length === 0 ? <section className="panel empty"><UiIcon name="comments" size={28} /><h2>İlk videoyu ekle.</h2><p>Video bağlantısını gir; alınan yorumlar mevcut inceleme ekranında görünsün.</p></section> : <div className="watched-video-grid">{videos.map((video) => {
-      const running = video.lockedAt && Date.now() - Date.parse(video.lockedAt) < 180000;
+      const running = video.lockedAt && Math.max(now, checkedAt) - Date.parse(video.lockedAt) < 180000;
       const status = video.status === "paused" ? "Duraklatıldı" : video.status === "blocked" ? "Erişim / tarama sorunu" : running ? "Yorumlar alınıyor" : video.lastError ? "Tekrar denenecek" : video.continuing ? "Tarama devam edecek" : video.lastSyncedAt ? "Son tarama tamamlandı" : "İlk tarama bekleniyor";
       return <article className="panel watched-video-card" key={video.id}>
         <div className="watched-video-meta"><span className={`review-platform ${video.platform}`}>{platforms[video.platform as VideoPlatform]}</span><span className={`badge ${video.lastError ? "warn" : video.status === "paused" ? "" : "blue"}`}>{status}</span></div>

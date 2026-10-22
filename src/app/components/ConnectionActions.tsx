@@ -66,7 +66,7 @@ export function ConnectionActions({ id, status, displayName, platform, webhookSu
           : <button className="btn" disabled={busy} onClick={() => setStatus("disabled")}>Durdur</button>}
       <button className="btn danger" disabled={busy} onClick={disconnect}>Bağlantıyı kaldır</button>
       {status === "active" || status === "degraded" ? <button className="btn" disabled={busy} onClick={retrySync}>Taramayı yeniden dene</button> : null}
-      {platform === "facebook" && !webhookSubscribed && (status === "active" || status === "degraded") ? <button className="btn" disabled={busy} onClick={restoreSubscription}>Webhook'u yeniden kur</button> : null}
+      {platform === "facebook" && !webhookSubscribed && (status === "active" || status === "degraded") ? <button className="btn" disabled={busy} onClick={restoreSubscription}>Webhook’u yeniden kur</button> : null}
     </div>
     {error ? <div className="small" style={{color:"var(--danger)",marginTop:6,maxWidth:280}}>{error}</div> : null}
     {message ? <div className="small" role="status" style={{marginTop:6,maxWidth:280}}>{message}</div> : null}

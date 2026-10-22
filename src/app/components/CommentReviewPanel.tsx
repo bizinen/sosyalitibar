@@ -77,8 +77,8 @@ export function CommentReviewPanel({ item, analysis, onReviewed }: {
   }
   useEffect(() => {
     mounted.current = true;
-    void load();
-    return () => { mounted.current = false; activeRequest.current?.abort(); translationRequest.current?.abort(); };
+    const timer = setTimeout(() => { void load(); }, 0);
+    return () => { clearTimeout(timer); mounted.current = false; activeRequest.current?.abort(); translationRequest.current?.abort(); };
     // The parent remounts this panel when the item or revision changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [item.id, item.analysisRevision]);

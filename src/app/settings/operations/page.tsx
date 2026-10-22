@@ -23,7 +23,7 @@ export default async function OperationsPage({ searchParams }: { searchParams: P
     db.select({ status: alertOutbox.status, count: sql<number>`count(*)::int` }).from(alertOutbox).groupBy(alertOutbox.status),
     db.select({ ...getTableColumns(webhookEvents), cursorAt: sql<string>`to_char(${webhookEvents.receivedAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')` }).from(webhookEvents).where(and(eq(webhookEvents.status, "dead"), webhookCursor ? or(lt(webhookEvents.receivedAt, sql`${webhookCursor.preciseAt ?? webhookCursor.at.toISOString()}::timestamptz`), and(eq(webhookEvents.receivedAt, sql`${webhookCursor.preciseAt ?? webhookCursor.at.toISOString()}::timestamptz`), lt(webhookEvents.id, webhookCursor.id))) : undefined)).orderBy(desc(webhookEvents.receivedAt), desc(webhookEvents.id)).limit(51),
     db.select({ ...getTableColumns(socialItems), cursorAt: sql<string>`to_char(${socialItems.updatedAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')` }).from(socialItems).where(and(eq(socialItems.analysisStatus, "dead"), analysisCursor ? or(lt(socialItems.updatedAt, sql`${analysisCursor.preciseAt ?? analysisCursor.at.toISOString()}::timestamptz`), and(eq(socialItems.updatedAt, sql`${analysisCursor.preciseAt ?? analysisCursor.at.toISOString()}::timestamptz`), lt(socialItems.id, analysisCursor.id))) : undefined)).orderBy(desc(socialItems.updatedAt), desc(socialItems.id)).limit(51),
-    db.select().from(workerHeartbeats),
+    db.select({ ...getTableColumns(workerHeartbeats), stale: sql<boolean>`extract(epoch from (now() - ${workerHeartbeats.lastAttemptAt})) * 1000 > ${workerHeartbeats.staleAfterMs}` }).from(workerHeartbeats),
   ]);
   const deadWebhooks = webhookRows.slice(0, 50);
   const deadAnalyses = analysisRows.slice(0, 50);
@@ -47,7 +47,7 @@ export default async function OperationsPage({ searchParams }: { searchParams: P
     </section>
     <section className="panel" style={{marginBottom:18}}><div className="panel-head"><h2>Worker görevleri</h2></div><div className="table-wrap"><table><thead><tr><th>Görev</th><th>Durum</th><th>Son başarılı çalışma</th></tr></thead><tbody>{WORKER_JOBS.map((job) => {
       const row = heartbeats.find((heartbeat) => heartbeat.job === job);
-      const stale = !row || Date.now() - row.lastAttemptAt.getTime() > row.staleAfterMs;
+      const stale = !row || row.stale;
       const labels: Record<string, string> = { "process-events": "Yorum bildirimleri", "process-analyses": "AI analizi", "process-alerts": "Alarm teslimatı", reconcile: "Düzenli tarama", "check-connections": "Hesap sağlığı", maintenance: "Bakım" };
       return <tr key={job}><td>{labels[job]}</td><td><span className={`badge ${stale ? "danger" : row?.lastSucceeded ? "ok" : "warn"}`}>{stale ? "Heartbeat bekleniyor" : row?.lastSucceeded ? "Görev çalıştı" : "Son çalışma başarısız"}</span></td><td>{row?.lastSuccessAt?.toLocaleString("tr-TR", { timeZone: "Europe/Istanbul" }) || "Henüz kayıt yok"}</td></tr>;
     })}</tbody></table></div><div className="panel-body small muted">Başarılı görev çalışması, her yorumun analiz edildiğini veya her alarmın teslim edildiğini kanıtlamaz. Ayrıntılar ilgili kuyrukta görünür.</div></section>
