@@ -21,8 +21,8 @@
     "db:smoke": "node scripts/smoke-db.mjs"
   },
   "dependencies": {
-    "drizzle-orm": "^0.44.5",
-    "next": "16.3.6",
+    "drizzle-orm": "^0.45.4",
+    "next": "16.3.8",
     "postgres": "^3.4.7",
     "react": "19.3.0",
     "react-dom": "19.3.0",
@@ -34,8 +34,13 @@
     "@types/react-dom": "^19.1.7",
     "drizzle-kit": "^0.31.4",
     "eslint": "^9.36.0",
-    "eslint-config-next": "16.3.6",
+    "eslint-config-next": "16.3.8",
     "typescript": "^5.9.2",
-    "vitest": "5.0.2"
+    "vitest": "5.0.5"
+  },
+  "overrides": {
+    "@esbuild-kit/core-utils@3.3.2": {
+      "esbuild": "0.25.12"
+    }
   }
 }

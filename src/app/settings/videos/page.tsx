@@ -14,6 +14,7 @@ export default async function VideosPage() {
       provider: watchedVideos.provider, resultsLimit: watchedVideos.resultsLimit, pollMinutes: watchedVideos.pollMinutes,
       maxChargeCents: watchedVideos.maxChargeCents, lastRunId: watchedVideos.lastRunId, lastRunCount: watchedVideos.lastRunCount,
       lastError: watchedVideos.lastError, lastSyncedAt: watchedVideos.lastSyncedAt, lockedAt: watchedVideos.lockedAt,
+      checkedAt: sql<number>`(extract(epoch from now()) * 1000)::float8`,
       continuing: sql<boolean>`${watchedVideos.progressEncrypted} is not null`,
       count: sql<number>`(select count(*)::int from social_items i where i.platform = ${watchedVideos.platform}
         and i.root_external_id = ${watchedVideos.externalId} and i.deleted_at is null)`,
@@ -28,6 +29,6 @@ export default async function VideosPage() {
   return <div className="shell"><AdminNav /><main className="container">
     <div className="page-head"><div><h1>İzlenen videolar</h1><p className="muted">Başka kanallardaki video ve paylaşımların yorumlarını tek yerde takip et.</p></div></div>
     <WatchedVideos videos={videos.map((video) => ({ ...video, lastSyncedAt: video.lastSyncedAt?.toISOString() ?? null,
-      lockedAt: video.lockedAt?.toISOString() ?? null }))} connections={connections} hasYouTubeKey={Boolean(key)} hasApifyKey={Boolean(apifyKey)} />
+      lockedAt: video.lockedAt?.toISOString() ?? null }))} connections={connections} hasYouTubeKey={Boolean(key)} hasApifyKey={Boolean(apifyKey)} checkedAt={videos[0]?.checkedAt ?? 0} />
   </main></div>;
 }

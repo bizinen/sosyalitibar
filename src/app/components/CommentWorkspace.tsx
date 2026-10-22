@@ -25,13 +25,19 @@ export function CommentWorkspace({ rows: initialRows, updateCursor, nextCursor, 
   const rows = useMemo(() => [...initialRows, ...older.filter((row) => !initialRows.some((initial) => initial.item.id === row.item.id))], [initialRows, older]);
   const [selected, setSelected] = useState<Row | null>(null);
   const [advance, setAdvance] = useState(false);
-  const [newCount, setNewCount] = useState(0);
+  const [updates, setUpdates] = useState<{ rows: Row[]; cursor: string; count: number; changed: number } | null>(null);
   const [pollError, setPollError] = useState(false);
-  const [changedCount, setChangedCount] = useState(0);
+  const newCount = updates?.rows === rows && updates.cursor === updateCursor ? updates.count : 0;
+  const changedCount = updates?.rows === rows && updates.cursor === updateCursor ? updates.changed : 0;
+  const [pageVersion, setPageVersion] = useState({ updateCursor, nextCursor });
+  if (pageVersion.updateCursor !== updateCursor || pageVersion.nextCursor !== nextCursor) {
+    setPageVersion({ updateCursor, nextCursor });
+    setOlder([]); setCursor(nextCursor); setLoadError(""); setLoading(false);
+  }
   const [fullscreen, setFullscreen] = useState(false);
   const workspaceRef = useRef<HTMLDivElement | null>(null);
   const detailRef = useRef<HTMLDivElement | null>(null);
-  const pageRequest = useRef(0);
+  const pageRequest = useRef({ version: 0 });
   const pageLoading = useRef(false);
   async function toggleFullscreen() {
     const workspace = workspaceRef.current;
@@ -67,23 +73,23 @@ export function CommentWorkspace({ rows: initialRows, updateCursor, nextCursor, 
   }, [fullscreen]);
   const active = rows.find((row) => row.item.id === selected?.item.id) ?? selected;
   useEffect(() => {
-    pageRequest.current++; pageLoading.current = false;
-    setOlder([]); setCursor(nextCursor); setLoadError(""); setLoading(false);
-    return () => { pageRequest.current++; };
+    const request = pageRequest.current;
+    request.version++; pageLoading.current = false;
+    return () => { request.version++; };
   }, [updateCursor, nextCursor]);
   async function loadMore(selectNext = false) {
     if (!cursor || pageLoading.current) return;
     pageLoading.current = true;
-    const request = ++pageRequest.current;
+    const request = ++pageRequest.current.version;
     setLoading(true); setLoadError("");
     try {
       const page = await loadCommentPage({ ...filters, cursor });
-      if (request !== pageRequest.current) return;
+      if (request !== pageRequest.current.version) return;
       const additions = page.rows.filter((row) => !rows.some((current) => current.item.id === row.item.id));
       setOlder((previous) => [...previous, ...additions]); setCursor(page.nextCursor);
       if (selectNext && additions[0]) setSelected(additions[0]);
-    } catch { if (request === pageRequest.current) setLoadError("Kalan yorumlar yüklenemedi. Yeniden dene; oturumun kapandıysa tekrar giriş yap."); }
-    finally { if (request === pageRequest.current) { pageLoading.current = false; setLoading(false); } }
+    } catch { if (request === pageRequest.current.version) setLoadError("Kalan yorumlar yüklenemedi. Yeniden dene; oturumun kapandıysa tekrar giriş yap."); }
+    finally { if (request === pageRequest.current.version) { pageLoading.current = false; setLoading(false); } }
   }
   useEffect(() => { detailRef.current?.scrollTo({ top: 0 }); }, [active?.item.id, active?.item.analysisRevision]);
   function move(direction: number) {
@@ -112,8 +118,6 @@ export function CommentWorkspace({ rows: initialRows, updateCursor, nextCursor, 
     let stopped = false;
     let timer: ReturnType<typeof setTimeout>;
     let controller: AbortController | undefined;
-    setNewCount(0);
-    setChangedCount(0);
     async function poll() {
       if (document.visibilityState === "visible") {
         controller = new AbortController();
@@ -124,9 +128,10 @@ export function CommentWorkspace({ rows: initialRows, updateCursor, nextCursor, 
           if (!response.ok) throw new Error("updates_failed");
           const body = await response.json();
           if (!stopped) {
-            setNewCount(Number(body.count) || 0); setPollError(false);
-            setChangedCount(watched.filter((row) => !body.updates?.some((update: { id: string; updatedAt: string }) => update.id === row.item.id
-              && new Date(update.updatedAt).getTime() === row.item.updatedAt.getTime())).length);
+            setPollError(false);
+            setUpdates({ rows, cursor: updateCursor, count: Number(body.count) || 0,
+              changed: watched.filter((row) => !body.updates?.some((update: { id: string; updatedAt: string }) => update.id === row.item.id
+                && new Date(update.updatedAt).getTime() === row.item.updatedAt.getTime())).length });
           }
         } catch { if (!stopped) setPollError(true); }
         finally { clearTimeout(timeout); }

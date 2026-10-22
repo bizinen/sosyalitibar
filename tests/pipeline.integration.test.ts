@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { and, desc, eq, lt, or, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { alertOutbox, alertSettings, connectionTargets, itemReviewEvents, metaAuthAccounts, oauthNonces, monitoringTargets, socialAnalyses, socialConnections, socialItems, webhookEvents } from "@/db/schema";
+import { alertOutbox, alertSettings, connectionTargets, itemReviewEvents, metaAuthAccounts, oauthNonces, monitoringTargets, socialAnalyses, socialConnections, socialItems, watchedVideos, webhookEvents } from "@/db/schema";
 import { encodeItemCursor, decodeItemCursor } from "@/lib/cursor";
 import { env } from "@/lib/config";
 import { decryptSecret, encryptSecret } from "@/lib/crypto";
@@ -22,11 +22,18 @@ import { recordItemReview } from "@/lib/item-review";
 import { PUT as saveAiPolicy } from "@/app/api/settings/ai-policy/route";
 import { defaultAiPolicy } from "@/lib/triage-contract";
 import { auditLogs } from "@/db/schema";
+import { commentRows, sourceKey } from "@/lib/comment-feed";
+import { commentSources } from "@/lib/comment-sources";
+import { PUT as saveMetaSettings } from "@/app/api/settings/meta/route";
+import { GET as oauthCallback } from "@/app/api/meta/callback/route";
 
-const mocks = vi.hoisted(() => ({ analyze: vi.fn(), debug: vi.fn(), posts: vi.fn(), comments: vi.fn(), replies: vi.fn() }));
+const mocks = vi.hoisted(() => ({ analyze: vi.fn(), debug: vi.fn(), posts: vi.fn(), comments: vi.fn(), replies: vi.fn(),
+  exchange: vi.fn(), longToken: vi.fn(), user: vi.fn(), scopes: vi.fn(), pages: vi.fn(), subscribe: vi.fn() }));
 vi.mock("@/lib/llm", async (original) => ({ ...await original<typeof import("@/lib/llm")>(), analyzeComment: mocks.analyze }));
 vi.mock("@/lib/meta", async (original) => ({ ...await original<typeof import("@/lib/meta")>(), debugToken: mocks.debug,
-  getFacebookPosts: mocks.posts, getFacebookComments: mocks.comments, getFacebookReplies: mocks.replies }));
+  getFacebookPosts: mocks.posts, getFacebookComments: mocks.comments, getFacebookReplies: mocks.replies,
+  exchangeCode: mocks.exchange, exchangeLongLivedUserToken: mocks.longToken, getMetaUser: mocks.user,
+  getGrantedScopes: mocks.scopes, getManagedPages: mocks.pages, subscribeFacebookPage: mocks.subscribe }));
 vi.mock("@/lib/auth", () => ({ isAdmin: async () => true }));
 
 function deferred<T>() {
@@ -89,12 +96,18 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
   });
   beforeEach(async () => {
     await db.execute(sql`truncate audit_logs, webhook_events, alert_outbox, social_analyses, social_items,
-      connection_targets, social_connections, meta_auth_accounts, monitoring_targets, oauth_nonces, auth_rate_limits, alert_settings, worker_heartbeats, ai_policy cascade`);
+      connection_targets, social_connections, meta_auth_accounts, monitoring_targets, oauth_nonces, auth_rate_limits, alert_settings, worker_heartbeats, ai_policy, meta_settings, llm_settings cascade`);
     mocks.analyze.mockReset().mockResolvedValue(result());
     mocks.debug.mockReset().mockResolvedValue({ isValid: true, scopes: ["pages_read_engagement", "pages_read_user_content", "pages_manage_metadata"], expiresAt: null });
     mocks.posts.mockReset().mockResolvedValue({ data: [] });
     mocks.comments.mockReset().mockResolvedValue({ data: [] });
     mocks.replies.mockReset().mockResolvedValue({ data: [] });
+    mocks.exchange.mockReset().mockResolvedValue({ accessToken: "short-token" });
+    mocks.longToken.mockReset().mockResolvedValue({ accessToken: "long-token" });
+    mocks.user.mockReset().mockResolvedValue({ id: "owner-1", name: "Owner" });
+    mocks.scopes.mockReset().mockResolvedValue(["pages_read_engagement", "pages_read_user_content", "pages_manage_metadata"]);
+    mocks.pages.mockReset().mockResolvedValue([{ id: "new-page", name: "New page", access_token: "page-token" }]);
+    mocks.subscribe.mockReset().mockResolvedValue(true);
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 200 })));
   });
   afterAll(async () => { await db.$client.end(); vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
@@ -238,17 +251,17 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
   it("resumes overflow comments from encrypted state without restarting the first post page", async () => {
     const source = await connection();
     const cfg = env(); const previousLimit = cfg.SYNC_RUN_MAX_STEPS;
-    cfg.SYNC_RUN_MAX_STEPS = 101;
+    cfg.SYNC_RUN_MAX_STEPS = 5;
     mocks.posts.mockResolvedValue({ data: [{ id: "post-1", message: "post context" }] });
-    mocks.comments.mockResolvedValue({ data: Array.from({ length: 51 }, (_, index) => ({ id: `comment-${index}`, message: "comment" })) });
+    mocks.comments.mockResolvedValue({ data: Array.from({ length: 3 }, (_, index) => ({ id: `comment-${index}`, message: "comment" })) });
     try {
       await syncAllConnections(source.id);
       const pending = await db.query.socialConnections.findFirst({ where: eq(socialConnections.id, source.id) });
       expect(typeof pending?.syncState.continuation).toBe("string");
       expect(JSON.stringify(pending?.syncState)).not.toContain("post context");
-      expect((await db.select().from(socialItems))).toHaveLength(50);
+      expect((await db.select().from(socialItems))).toHaveLength(2);
       await syncAllConnections(source.id);
-      expect((await db.select().from(socialItems))).toHaveLength(51);
+      expect((await db.select().from(socialItems))).toHaveLength(3);
       expect(mocks.posts).toHaveBeenCalledTimes(1);
       expect((await db.query.socialConnections.findFirst({ where: eq(socialConnections.id, source.id) }))?.syncState.continuation).toBeNull();
     } finally { cfg.SYNC_RUN_MAX_STEPS = previousLimit; }
@@ -335,6 +348,101 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
       lt(socialItems.ingestedAt, boundary), and(eq(socialItems.ingestedAt, boundary), lt(socialItems.id, cursor.id)),
     )).orderBy(desc(socialItems.ingestedAt), desc(socialItems.id));
     expect(remaining.map((row) => row.externalId)).toEqual(["micro-2", "micro-3"]);
+  });
+
+  it("retains external source identity without reopening reviewed comments or duplicating alerts", async () => {
+    const [video] = await db.insert(watchedVideos).values({ platform: "youtube", externalId: "video-1", url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" }).returning();
+    const input = { platform: "youtube" as const, externalId: "external-comment", rootExternalId: "video-1", text: "Unchanged comment",
+      raw: { external_source: true, watched_video_id: video!.id, source_channel: "Channel",
+        source_post: { id: "video-1", text: "Post context" }, context_incomplete: false, provider_detail: "discard" } };
+    const { item: source } = await upsertSocialItem(input);
+    const [job] = await claimAnalysisJobs(1);
+    await analyzeClaimedItem(job!.id, job!.lockId, async () => ({ ...result(), data: { label: "acil_inceleme" } }));
+    await recordItemReview(source.id, { reviewStatus: "reviewed", expectedReviewStatus: "new", analysisRevision: source.analysisRevision });
+    await db.update(socialItems).set({ ingestedAt: new Date(Date.now() - 100 * 86400000) }).where(eq(socialItems.id, source.id));
+    const run = () => maintenance(new Request("http://localhost:3000/api/jobs/maintenance", {
+      method: "POST", headers: { authorization: `Bearer ${env().CRON_SECRET}` },
+    }));
+    expect(await (await run()).json()).toMatchObject({ rawItemsCleared: 1 });
+    expect((await db.query.socialItems.findFirst())?.raw).toEqual({ external_source: true, watched_video_id: video!.id,
+      source_channel: "Channel", source_post: { id: "video-1", text: "Post context" } });
+    expect(await (await run()).json()).toMatchObject({ rawItemsCleared: 0 });
+    expect(await upsertSocialItem(input)).toMatchObject({ changed: false, item: { analysisRevision: source.analysisRevision, analysisStatus: "complete", reviewStatus: "reviewed" } });
+    expect(await db.select().from(alertOutbox)).toHaveLength(1);
+    expect(await db.select().from(itemReviewEvents)).toHaveLength(1);
+    expect((await db.query.socialAnalyses.findFirst())?.triageLabel).toBe("acil_inceleme");
+  });
+
+  it("uses the same pending definition for source counts and the linked comment list", async () => {
+    const source = await connection();
+    for (const [index, label] of ["inceleme_gerekmiyor", "insan_incelemesi_gerekli", "acil_inceleme"].entries()) {
+      await upsertSocialItem({ connectionId: source.id, platform: "facebook", externalId: `source-${index}`, rootExternalId: "post-1", text: "Comment" });
+      const [job] = await claimAnalysisJobs(1);
+      await analyzeClaimedItem(job!.id, job!.lockId, async () => ({ ...result(), data: { label: label as "inceleme_gerekmiyor" | "insan_incelemesi_gerekli" | "acil_inceleme" } }));
+    }
+    await upsertSocialItem({ connectionId: source.id, platform: "facebook", externalId: "waiting-analysis", rootExternalId: "post-1", text: "Pending analysis" });
+    const page = await commentSources({});
+    const pending = await commentRows({ source: sourceKey("facebook", "post-1"), view: "pending" });
+    expect(page.rows[0]).toMatchObject({ comments: 4, pending: 2 });
+    expect(pending).toHaveLength(page.rows[0]!.pending);
+    expect(pending.map((row) => row.item.externalId).sort()).toEqual(["source-1", "source-2"]);
+  });
+
+  it("filters triage by owned account context while giving human decisions precedence", async () => {
+    const source = await connection();
+    const [target] = await db.insert(monitoringTargets).values({ name: "Hedef" }).returning();
+    await db.insert(connectionTargets).values({ connectionId: source.id, targetId: target!.id });
+    const saved = await item(source.id);
+    const [job] = await claimAnalysisJobs(1);
+    await analyzeClaimedItem(job!.id, job!.lockId, async () => ({ ...result(), data: { label: "insan_incelemesi_gerekli" } }));
+    expect(await commentRows({ target: "Hedef" })).toHaveLength(1);
+    expect((await db.query.socialAnalyses.findFirst())?.matchedTarget).toBeNull();
+    await recordItemReview(saved.id, { reviewStatus: "reviewed", expectedReviewStatus: "new", analysisRevision: saved.analysisRevision,
+      assessment: { verdict: "criticism", category: "criticism", severity: 0, targetMatch: false, matchedTarget: null, reason: "Different subject" } });
+    expect(await commentRows({ target: "Hedef" })).toHaveLength(0);
+    await db.delete(itemReviewEvents);
+    await db.update(socialItems).set({ raw: { external_source: true } });
+    expect(await commentRows({ target: "Hedef" })).toHaveLength(0);
+    await recordItemReview(saved.id, { reviewStatus: "reviewed", expectedReviewStatus: "reviewed", analysisRevision: saved.analysisRevision,
+      assessment: { verdict: "attack", category: "insult", severity: 70, targetMatch: true, matchedTarget: "Hedef", reason: "Explicit target" } });
+    expect(await commentRows({ target: "Hedef" })).toHaveLength(1);
+    expect(await commentRows({ target: "Hedef", view: "confirmed" })).toHaveLength(1);
+  });
+
+  it("switches Meta apps only after disconnect and removes unused old OAuth credentials", async () => {
+    const [owner] = await db.insert(metaAuthAccounts).values({ metaUserId: "owner-1", encryptedUserAccessToken: encryptSecret("old-owner-token") }).returning();
+    const source = await connection();
+    await db.update(socialConnections).set({ authAccountId: owner!.id }).where(eq(socialConnections.id, source.id));
+    const saved = await item(source.id);
+    const settings = { appId: "2", appSecret: "new-app-secret-value", publicOrigin: "https://example.test", graphVersion: "v26.0", revision: 0 };
+    expect(await (await saveMetaSettings(request(settings))).json()).toEqual({ error: "app_change_requires_disconnect" });
+    await disconnect(request(), params(source.id));
+    expect(await (await saveMetaSettings(request({ ...settings, appSecret: "" }))).json()).toEqual({ error: "app_secret_required" });
+    expect(await db.select().from(metaAuthAccounts)).toHaveLength(1);
+    expect((await saveMetaSettings(request(settings))).status).toBe(200);
+    expect(await db.select().from(metaAuthAccounts)).toHaveLength(0);
+    expect(await db.query.socialItems.findFirst({ where: eq(socialItems.id, saved.id) })).toMatchObject({ connectionId: null, text: saved.text });
+    const current = await db.query.metaSettings.findFirst();
+    expect(current).toMatchObject({ appId: "2", revision: 1 });
+    expect(decryptSecret(current!.appSecretEncrypted)).toBe(settings.appSecret);
+  });
+
+  it("fences an OAuth callback when settings change after the owner has been saved", async () => {
+    const entered = deferred<void>();
+    const release = deferred<{ isValid: boolean; appId: string; scopes: string[] }>();
+    mocks.debug.mockResolvedValueOnce({ isValid: true, appId: "1", userId: "owner-1", expiresAt: null })
+      .mockImplementationOnce(() => { entered.resolve(); return release.promise; });
+    const state = await createOAuthState();
+    const callback = oauthCallback(new Request(`http://localhost:3000/api/meta/callback?code=fixture&state=${encodeURIComponent(state)}`));
+    await entered.promise;
+    expect(await db.select().from(metaAuthAccounts)).toHaveLength(1);
+    expect((await saveMetaSettings(request({ appId: "1", appSecret: "rotated-app-secret", publicOrigin: "https://example.test", graphVersion: "v26.0", revision: 0 }))).status).toBe(200);
+    release.resolve({ isValid: true, appId: "1", scopes: await mocks.scopes() });
+    const response = await callback;
+    expect(response.headers.get("location")).toContain("meta_error=connect_failed");
+    expect(await db.select().from(socialConnections)).toHaveLength(0);
+    expect(mocks.subscribe).not.toHaveBeenCalled();
+    expect((await db.query.metaSettings.findFirst())?.revision).toBe(1);
   });
 
   it.each(["facebook", "instagram"] as const)("handles explicit %s delete without reviving a tombstone", async (platform) => {
@@ -515,7 +623,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
     mocks.posts.mockResolvedValue({ data: [{ id: "post-1" }] });
     mocks.comments.mockResolvedValue({ data: [{ id: "comment-1", message: "yorum" }] });
     mocks.replies.mockRejectedValue(new Error("reply timeout"));
-    expect((await syncAllConnections(source.id))[0]?.ok).toBe(false);
+    expect((await syncAllConnections(source.id))[0]).toMatchObject({ ok: true, coverageLimited: true, retryTasks: 1, items: 1 });
     expect((await db.query.socialConnections.findFirst())?.status).toBe("degraded");
   });
 

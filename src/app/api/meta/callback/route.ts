@@ -106,6 +106,9 @@ export async function GET(req: Request) {
         ? "Page token invalid or belongs to another app" : !subscribed ? "Page webhook subscription failed" : missingPageScopes.length ? `missing_scope:${missingPageScopes.join(",")}` : null;
 
       await db.transaction(async (tx) => {
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtext('sosyal_itibar_meta_settings'))`);
+        const [settings] = await tx.select({ revision: metaSettings.revision }).from(metaSettings).where(eq(metaSettings.id, "primary"));
+        if ((settings?.revision ?? 0) !== cfg.metaSettingsRevision) throw new Error("Meta settings changed during authorization; reconnect required");
         await lockAnalysisContext(tx, true);
         const [previous] = await tx.select().from(socialConnections).where(and(
           eq(socialConnections.platform, "facebook"), eq(socialConnections.externalAccountId, page.id),
@@ -150,6 +153,9 @@ export async function GET(req: Request) {
       if (page.instagram_business_account?.id) {
         const username = page.instagram_business_account.username || `ig-${page.instagram_business_account.id}`;
         await db.transaction(async (tx) => {
+          await tx.execute(sql`select pg_advisory_xact_lock(hashtext('sosyal_itibar_meta_settings'))`);
+          const [settings] = await tx.select({ revision: metaSettings.revision }).from(metaSettings).where(eq(metaSettings.id, "primary"));
+          if ((settings?.revision ?? 0) !== cfg.metaSettingsRevision) throw new Error("Meta settings changed during authorization; reconnect required");
           await lockAnalysisContext(tx, true);
           const [previous] = await tx.select().from(socialConnections).where(and(
             eq(socialConnections.platform, "instagram"),
