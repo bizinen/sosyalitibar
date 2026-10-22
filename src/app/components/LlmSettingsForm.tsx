@@ -2,7 +2,7 @@
 
 import { useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
-import { LLM_PROVIDERS, llmProviderId, type LlmProviderId, type LlmProviderProfile } from "@/lib/llm-providers";
+import { LLM_PROVIDERS, llmProviderId, validLlmModelId, type LlmProviderId, type LlmProviderProfile } from "@/lib/llm-providers";
 
 export function LlmSettingsForm({ baseUrl, model, hasKey, revision, profiles }: { baseUrl: string; model: string; hasKey: boolean; revision: number; profiles: LlmProviderProfile[] }) {
   const router = useRouter();
@@ -25,10 +25,15 @@ export function LlmSettingsForm({ baseUrl, model, hasKey, revision, profiles }: 
     setModel(savedProfiles.find((entry) => entry.provider === next)?.model ?? (next === llmProviderId(baseUrl) ? model : ""));
   }
   async function save(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); setBusy(true); setMessage(""); setError("");
+    event.preventDefault(); setMessage(""); setError("");
+    if (!validLlmModelId(selectedUrl, selectedModel.trim())) {
+      setError("Runware için AIR model kimliği gir; örneğin openai:gpt@5.4-nano. Yalnız sayı geçerli bir model kimliği değildir."); return;
+    }
+    setBusy(true);
     try {
       const response = await fetch("/api/settings/llm", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider, baseUrl: selectedUrl, model: selectedModel, apiKey: key, revision: version }) });
       const body = await response.json();
+      if (!response.ok && body.error === "invalid_model") throw new Error("Runware AIR model kimliği geçersiz; sağlayıcının model kimliğini kontrol et.");
       if (!response.ok) throw new Error(body.error === "conflict" ? "Ayarlar başka bir ekranda değişti. Sayfayı yenileyip tekrar düzenle." : body.error === "provider_key_required" ? "Sağlayıcı adresi değiştiğinde yeni sağlayıcının API anahtarını gir." : body.error === "api_key_required" ? "API anahtarı gerekli." : body.error === "invalid_provider_url" ? "HTTPS sağlayıcı adresi veya HTTP yerel sunucu adresi kullan. Adrese anahtar veya query parametresi ekleme." : "Ayarlar kaydedilemedi. Alanları kontrol edip tekrar dene.");
       setVersion(body.revision); setKey(""); setProfiles((previous) => [...previous.filter((entry) => entry.provider !== provider), { provider, model: selectedModel.trim(), hasKey: true }]); setMessage("Sağlayıcı kaydedildi ve etkinleştirildi. Sonraki analiz ve çeviriler bu modeli kullanır. Geçmiş sonuçlar değişmez."); router.refresh();
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Ayarlar kaydedilemedi."); }

@@ -26,6 +26,7 @@ import { commentRows, sourceKey } from "@/lib/comment-feed";
 import { commentSources } from "@/lib/comment-sources";
 import { PUT as saveMetaSettings } from "@/app/api/settings/meta/route";
 import { GET as oauthCallback } from "@/app/api/meta/callback/route";
+import { PUT as saveLlmSettings } from "@/app/api/settings/llm/route";
 import VideosPage from "@/app/settings/videos/page";
 import { collectWatchedVideos } from "@/lib/watched-videos";
 import { PATCH as configureVideo } from "@/app/api/videos/[id]/route";
@@ -790,6 +791,12 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
     const page = await VideosPage();
     const videos = page.props.children[1].props.children[1].props.videos as Array<{ count: number }>;
     expect(videos[0]?.count).toBe(2);
+  });
+
+  it("rejects invalid Runware models before changing stored settings", async () => {
+    const response = await saveLlmSettings(request({ provider: "runware", baseUrl: "https://api.runware.ai/v1", model: "1", apiKey: "fixture", revision: 0 }));
+    expect(response.status).toBe(400); expect(await response.json()).toEqual({ error: "invalid_model" });
+    expect((await db.execute(sql`select count(*)::int as count from llm_settings`))[0]?.count).toBe(0);
   });
 
   it("accepts an OAuth nonce once, including parallel replay attempts", async () => {

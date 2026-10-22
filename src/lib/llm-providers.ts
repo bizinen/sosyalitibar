@@ -13,9 +13,16 @@ export function llmProviderId(baseUrl: string): LlmProviderId {
   return LLM_PROVIDERS.find((provider) => provider.baseUrl === normalized)?.id ?? "custom";
 }
 
-export function llmRequestOptions(baseUrl: string, tokenLimit: number, temperature: number) {
+export function validLlmModelId(baseUrl: string, model: string) {
+  return llmProviderId(baseUrl) !== "runware" || /^[A-Za-z0-9_-]+:[^\s:@]+@[^\s:@]+$/.test(model);
+}
+
+export function llmRequestOptions(baseUrl: string, tokenLimit: number, temperature: number, model?: string) {
   const provider = llmProviderId(baseUrl);
   return {
+    // This Runware model currently produces malformed prefixes in JSON mode.
+    // Response schemas still validate every result in the application.
+    ...(provider === "runware" && model === "openai:gpt-oss@120b" ? {} : { response_format: { type: "json_object" } }),
     ...(provider === "openai" || provider === "runware"
       ? { max_completion_tokens: Math.max(tokenLimit, 8192) }
       : { max_tokens: provider === "custom" ? tokenLimit : Math.max(tokenLimit, 8192) }),

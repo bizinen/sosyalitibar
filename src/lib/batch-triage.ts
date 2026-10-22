@@ -54,8 +54,8 @@ export function createBatchAnalyzer(expectedCount: number, cfg: Settings) {
       const response = await fetch(`${cfg.LLM_BASE_URL.replace(/\/+$/, "")}/chat/completions`, {
         method: "POST", redirect: "error", signal: controller.signal,
         headers: { "content-type": "application/json", authorization: `Bearer ${cfg.LLM_API_KEY}`, "x-title": "Sosyal Itibar" },
-        body: JSON.stringify({ model: cfg.LLM_MODEL, ...llmRequestOptions(cfg.LLM_BASE_URL, Math.max(512, entries.length * 70), 0),
-          response_format: { type: "json_object" }, messages: [{ role: "system", content: system }, { role: "user", content: payload(entries) }] }),
+        body: JSON.stringify({ model: cfg.LLM_MODEL, ...llmRequestOptions(cfg.LLM_BASE_URL, Math.max(512, entries.length * 70), 0, cfg.LLM_MODEL),
+          messages: [{ role: "system", content: system }, { role: "user", content: payload(entries) }] }),
       });
       if (!response.ok) { await response.body?.cancel(); throw new Error(`LLM HTTP ${response.status}`); }
       body = new TextDecoder().decode(await readResponseBody(response, 1024 * 1024));

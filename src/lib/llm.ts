@@ -205,8 +205,7 @@ export async function analyzeComment(input: AnalyzeCommentInput, settings?: Awai
           },
           body: JSON.stringify({
             model: providerConfig.model,
-            ...llmRequestOptions(base, 1800, 0.05),
-            response_format: { type: "json_object" },
+            ...llmRequestOptions(base, 1800, 0.05, providerConfig.model),
             messages: [{ role: "system", content: system }, { role: "user", content: user }],
           }),
         });
