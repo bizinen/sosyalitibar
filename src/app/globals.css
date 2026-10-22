@@ -322,6 +322,11 @@ button.badge { min-height: 36px; border: 1px solid var(--line); }
 .source-search-filters label > span { display: flex; align-items: center; gap: 6px; }
 .source-search-filters label svg { color: #8a95a5; transition: transform 140ms ease, color 140ms ease; }
 .source-search-filters label:focus-within svg { color: #345985; transform: translateY(-1px); }
+.comment-filters .advanced-filters { margin-top: 0; padding-top: 10px; border-top: 1px solid #edf0f5; }
+.comment-filters .advanced-filters .filters { gap: 12px; }
+.comment-filters .filter-footer { margin-top: 0; }
+.comment-filters .filter-footer .text-link { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: #6d7d93; }
+.comment-filters .filter-footer .text-link:is(:hover,:focus-visible) svg { animation: source-settings-motion 280ms ease-out; }
 .source-sort-description { margin-left: 12px; color: #8490a1; }
 .source-results-head > span { display: flex; flex-wrap: wrap; row-gap: 5px; }
 .source-results-head strong { color: #536178; font-weight: 550; }

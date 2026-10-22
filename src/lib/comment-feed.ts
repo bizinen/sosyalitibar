@@ -1,10 +1,12 @@
-import { and, desc, eq, gte, ilike, isNotNull, isNull, lt, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, ilike, isNotNull, isNull, lt, or, sql, type SQL } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { db } from "@/lib/db";
 import { socialAnalyses, socialConnections, socialItems } from "@/db/schema";
 import { decodeItemCursor } from "@/lib/cursor";
 
-export type CommentParams = { mode?: string; source?: string; sourceQ?: string; sourceAfter?: string; sourceSort?: string; sourceFilter?: string; video?: string; platform?: string; sentiment?: string; category?: string; minSeverity?: string; review?: string; needsReview?: string; q?: string; cursor?: string; connection?: string; target?: string; from?: string; to?: string; analysis?: string; connected?: string; meta_error?: string; view?: string };
+export type CommentParams = { mode?: string; source?: string; sourceQ?: string; sourceAfter?: string; sourceSort?: string; sourceFilter?: string; commentSort?: string; video?: string; platform?: string; sentiment?: string; category?: string; minSeverity?: string; review?: string; needsReview?: string; q?: string; cursor?: string; connection?: string; target?: string; from?: string; to?: string; analysis?: string; connected?: string; meta_error?: string; view?: string };
+
+export const commentSortOptions = [{ value: "recent", label: "Alınma: yeniden eskiye" }, { value: "oldest", label: "Alınma: eskiden yeniye" }] as const;
 
 export function sourceKey(platform: string, id: string | null) {
   return Buffer.from(JSON.stringify([platform, id]), "utf8").toString("base64url");
@@ -80,9 +82,10 @@ export function commentConditions(p: CommentParams) {
   const cursor = decodeItemCursor(p.cursor);
   if (cursor) {
     const cursorAt = sql`${cursor.preciseAt ?? cursor.at.toISOString()}::timestamptz`;
+    const compare = p.commentSort === "oldest" ? gt : lt;
     const cursorCondition = or(
-      lt(socialItems.ingestedAt, cursorAt),
-      and(eq(socialItems.ingestedAt, cursorAt), lt(socialItems.id, cursor.id)),
+      compare(socialItems.ingestedAt, cursorAt),
+      and(eq(socialItems.ingestedAt, cursorAt), compare(socialItems.id, cursor.id)),
     );
     if (cursorCondition) conditions.push(cursorCondition);
   }
@@ -91,6 +94,7 @@ export function commentConditions(p: CommentParams) {
 
 export async function commentRows(p: CommentParams) {
   const conditions = commentConditions(p);
+  const order = p.commentSort === "oldest" ? asc : desc;
   const parent = alias(socialItems, "parent_item");
   const rows = await db.select({ item: socialItems, analysis: socialAnalyses, connectionName: socialConnections.displayName, parentText: parent.text, cursorAt: sql<string>`to_char(${socialItems.ingestedAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')` })
     .from(socialItems)
@@ -98,7 +102,7 @@ export async function commentRows(p: CommentParams) {
     .leftJoin(socialConnections, eq(socialConnections.id, socialItems.connectionId))
     .leftJoin(parent, and(eq(parent.externalId, socialItems.parentExternalId), eq(parent.platform, socialItems.platform), isNull(parent.deletedAt), isNull(parent.sourceUnavailableAt)))
     .where(and(...conditions))
-    .orderBy(desc(socialItems.ingestedAt), desc(socialItems.id))
+    .orderBy(order(socialItems.ingestedAt), order(socialItems.id))
     .limit(101);
   return rows;
 }

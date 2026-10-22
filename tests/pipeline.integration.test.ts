@@ -23,6 +23,7 @@ import { PUT as saveAiPolicy } from "@/app/api/settings/ai-policy/route";
 import { defaultAiPolicy } from "@/lib/triage-contract";
 import { auditLogs } from "@/db/schema";
 import { commentRows, sourceKey } from "@/lib/comment-feed";
+import { loadCommentPage } from "@/app/actions/comment-feed";
 import { commentSources } from "@/lib/comment-sources";
 import { PUT as saveMetaSettings } from "@/app/api/settings/meta/route";
 import { GET as oauthCallback } from "@/app/api/meta/callback/route";
@@ -360,6 +361,31 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
       lt(socialItems.ingestedAt, boundary), and(eq(socialItems.ingestedAt, boundary), lt(socialItems.id, cursor.id)),
     )).orderBy(desc(socialItems.ingestedAt), desc(socialItems.id));
     expect(remaining.map((row) => row.externalId)).toEqual(["micro-2", "micro-3"]);
+  });
+
+  it.each(["recent", "oldest"])("paginates comment sort %s with tied microsecond timestamps and active filters", async commentSort => {
+    const account = await connection();
+    await db.execute(sql`insert into social_items (id, connection_id, platform, external_id, root_external_id, text, ingested_at, analysis_excluded, analysis_status)
+      select ('00000000-0000-4000-8000-' || lpad(n::text, 12, '0'))::uuid, ${account.id}::uuid, 'facebook', 'sort-' || n, 'sort-post', 'fixture',
+        '2026-01-01T12:00:00.123000Z'::timestamptz + (n / 3) * interval '1 microsecond', true, 'complete'
+      from generate_series(0, 107) n`);
+    await db.insert(socialItems).values([
+      { platform: "facebook", externalId: "outside-account", rootExternalId: "sort-post", text: "fixture", ingestedAt: new Date("2026-01-01"), analysisExcluded: true, analysisStatus: "complete" },
+      { platform: "facebook", externalId: "outside-source", connectionId: account.id, rootExternalId: "other-post", text: "fixture", ingestedAt: new Date("2026-01-01"), analysisExcluded: true, analysisStatus: "complete" },
+      { platform: "facebook", externalId: "outside-query", connectionId: account.id, rootExternalId: "sort-post", text: "other", ingestedAt: new Date("2026-01-01"), analysisExcluded: true, analysisStatus: "complete" },
+    ]);
+    const filters = { commentSort, source: sourceKey("facebook", "sort-post"), connection: account.id, q: "fixture", from: "2026-01-01", to: "2026-01-01", view: "history", review: "new" };
+    const first = await commentRows(filters);
+    expect(first).toHaveLength(101);
+    const visible = first.slice(0, 100); const last = visible.at(-1)!;
+    const next = await loadCommentPage({ ...filters, cursor: encodeItemCursor({ at: last.item.ingestedAt, id: last.item.id, preciseAt: last.cursorAt }) });
+    expect(next.rows).toHaveLength(8); expect(next.nextCursor).toBeNull();
+    const actual = [...visible, ...next.rows].map(row => row.item.externalId);
+    const expected = Array.from({ length: 108 }, (_, n) => `sort-${n}`);
+    expect(actual).toEqual(commentSort === "oldest" ? expected : expected.reverse());
+    expect(new Set(actual).size).toBe(108);
+    const fallback = await commentRows({ ...filters, commentSort: "unknown" });
+    expect(fallback[0]!.item.externalId).toBe("sort-107");
   });
 
   it("retains external source identity without reopening reviewed comments or duplicating alerts", async () => {
