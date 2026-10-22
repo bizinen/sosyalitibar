@@ -1,13 +1,15 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
-export function ConnectionActions({ id, status, displayName, platform, webhookSubscribed }: { id: string; status: string; displayName: string; platform?: string; webhookSubscribed?: boolean }) {
+export function ConnectionActions({ id, status, displayName, platform, webhookSubscribed, reconnectUrl, needsReconnect }: { id: string; status: string; displayName: string; platform?: string; webhookSubscribed?: boolean; reconnectUrl: string | null; needsReconnect?: boolean }) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [confirmRemove, setConfirmRemove] = useState(false);
+  const removeButton = useRef<HTMLButtonElement>(null);
 
   async function retrySync() {
     setBusy(true); setError(""); setMessage("");
@@ -35,23 +37,24 @@ export function ConnectionActions({ id, status, displayName, platform, webhookSu
   }
 
   async function setStatus(next: "active" | "disabled") {
-    setBusy(true); setError("");
+    setBusy(true); setError(""); setMessage("");
     try {
       const res = await fetch(`/api/connections/${id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ status: next }) });
       const body = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(body.error === "reauthorization_required" ? "Token iptal edilmiş; Meta hesabını yeniden bağlayın." : (body.error || "Durum değiştirilemedi"));
+      if (!res.ok) throw new Error(body.error === "reauthorization_required" ? "Yetki kaldırılmış; hesabı yeniden bağla." : body.error === "connection_changed_retry" ? "Bağlantı başka bir işlemde değişti. Listeyi yenileyip tekrar dene." : "Durum değiştirilemedi. Listeyi yenileyip tekrar dene.");
+      setMessage(next === "disabled" ? "Yorum alımı duraklatıldı. Geçmiş yorumlar korundu." : "Takip açıldı. Bağlantı ve izinler kontrol edilecek.");
       router.refresh();
     } catch (e) { setError(e instanceof Error ? e.message : "Durum değiştirilemedi"); }
     finally { setBusy(false); }
   }
 
   async function disconnect() {
-    if (!window.confirm(`${displayName} bağlantısı kaldırılsın mı? Geçmiş yorumlar korunacak, hesap bağlamına bağlı analizler yeniden değerlendirilecek.`)) return;
-    setBusy(true); setError("");
+    setBusy(true); setError(""); setMessage("");
     try {
       const res = await fetch(`/api/connections/${id}`, { method: "DELETE" });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(body.error || "Bağlantı kaldırılamadı");
+      setConfirmRemove(false);
       router.refresh();
     } catch (e) { setError(e instanceof Error ? e.message : "Bağlantı kaldırılamadı"); }
     finally { setBusy(false); }
@@ -60,15 +63,19 @@ export function ConnectionActions({ id, status, displayName, platform, webhookSu
   return <div>
     <div className="btn-row">
       {status === "disabled"
-        ? <button className="btn" disabled={busy} onClick={() => setStatus("active")}>Etkinleştir</button>
-        : status === "revoked"
-          ? <a className="btn" href="/api/meta/connect">Yeniden bağla</a>
-          : <button className="btn" disabled={busy} onClick={() => setStatus("disabled")}>Durdur</button>}
-      <button className="btn danger" disabled={busy} onClick={disconnect}>Bağlantıyı kaldır</button>
-      {status === "active" || status === "degraded" ? <button className="btn" disabled={busy} onClick={retrySync}>Taramayı yeniden dene</button> : null}
-      {platform === "facebook" && !webhookSubscribed && (status === "active" || status === "degraded") ? <button className="btn" disabled={busy} onClick={restoreSubscription}>Webhook’u yeniden kur</button> : null}
+        ? <button className="btn" disabled={busy} onClick={() => setStatus("active")}>Takibe devam et</button>
+        : status === "revoked" || needsReconnect
+          ? <a className="btn" href={reconnectUrl ?? "/settings/integrations#meta"}>{reconnectUrl ? "Yeniden bağla" : "Bağlantı ayarlarını aç"}</a>
+          : <button className="btn" disabled={busy} onClick={() => setStatus("disabled")}>Duraklat</button>}
+      <details className="account-more"><summary>Diğer işlemler</summary><div className="btn-row">
+      {needsReconnect && status !== "revoked" ? <button className="btn" disabled={busy} onClick={() => setStatus("disabled")}>Duraklat</button> : null}
+      {status === "active" || status === "degraded" ? <button className="btn" disabled={busy} onClick={retrySync}>Yorumları yeniden tara</button> : null}
+      {platform === "facebook" && !webhookSubscribed && (status === "active" || status === "degraded") ? <button className="btn" disabled={busy} onClick={restoreSubscription}>Yorum bildirimlerini bağla</button> : null}
+      <button ref={removeButton} className="btn danger" disabled={busy} onClick={() => setConfirmRemove(true)}>Bağlantıyı kaldır…</button>
+      </div></details>
     </div>
-    {error ? <div className="small" style={{color:"var(--danger)",marginTop:6,maxWidth:280}}>{error}</div> : null}
+    {confirmRemove ? <div className="account-remove-confirm" role="group" aria-label={`${displayName} bağlantısını kaldır`}><strong>{displayName} bağlantısı kaldırılsın mı?</strong><p>Yeni yorum alımı durur. Geçmiş yorumlar ve incelemeler korunur. Hesap bağlamına bağlı analizler yeniden değerlendirme kuyruğuna alınır. Sosyal medya hesabın silinmez.</p><div className="btn-row"><button className="btn" disabled={busy} onClick={() => { setConfirmRemove(false); removeButton.current?.focus(); }}>Vazgeç</button><button className="btn danger" disabled={busy} onClick={disconnect}>Evet, bağlantıyı kaldır</button></div></div> : null}
+    {error ? <div className="account-action-error small" role="alert">{error}</div> : null}
     {message ? <div className="small" role="status" style={{marginTop:6,maxWidth:280}}>{message}</div> : null}
   </div>;
 }
