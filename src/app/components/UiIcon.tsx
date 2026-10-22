@@ -1,4 +1,4 @@
-type IconName = "comments" | "accounts" | "spark" | "bell" | "target" | "settings" | "plus" | "arrow" | "check" | "logout" | "shield" | "more" | "external" | "pause" | "play" | "trash" | "refresh";
+type IconName = "comments" | "accounts" | "spark" | "bell" | "target" | "settings" | "plus" | "arrow" | "check" | "logout" | "shield" | "more" | "external" | "pause" | "play" | "trash" | "refresh" | "search" | "sort" | "filter";
 
 const paths: Record<IconName, string> = {
   comments: "M21 11.5a8.4 8.4 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.4 8.4 0 0 1-3.8-.9L3 21l1.9-5.7a8.4 8.4 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.4 8.4 0 0 1 3.8-.9h.5a8.5 8.5 0 0 1 8 8v.5ZM8 10h8M8 14h5",
@@ -18,6 +18,9 @@ const paths: Record<IconName, string> = {
   play: "m8 4 12 8-12 8V4Z",
   trash: "M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7",
   refresh: "M20 7v5h-5M4 17v-5h5M6.1 6.1A8 8 0 0 1 20 12M4 12a8 8 0 0 0 13.9 5.9",
+  search: "M21 21l-5-5M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0Z",
+  sort: "M7 3v18m-4-4 4 4 4-4M15 5h6M15 10h4M15 15h2",
+  filter: "M3 4h18l-7 8v7l-4 2v-9L3 4Z",
 };
 
 export function UiIcon({ name, size = 20 }: { name: IconName; size?: number }) {

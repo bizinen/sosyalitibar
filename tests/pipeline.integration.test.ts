@@ -397,6 +397,38 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
     expect(page.rows[0]).toMatchObject({ comments: 4, pending: 2 });
     expect(pending).toHaveLength(page.rows[0]!.pending);
     expect(pending.map((row) => row.item.externalId).sort()).toEqual(["source-1", "source-2"]);
+    await db.insert(watchedVideos).values({ platform: "youtube", externalId: "EmptySrc001", url: "https://youtu.be/EmptySrc001" });
+    expect((await commentSources({ sourceFilter: "pending" })).rows.map(row => row.source_id)).toEqual(["post-1"]);
+    expect((await commentSources({ sourceFilter: "risk" })).rows.map(row => row.source_id)).toEqual(["post-1"]);
+    const empty = await commentSources({ sourceFilter: "empty" });
+    expect(empty.total).toBe(1);
+    expect(empty.rows[0]?.source_id).toBe("EmptySrc001");
+    expect((await commentSources({ source: sourceKey("facebook", "post-1"), sourceFilter: "empty" }, true)).rows[0]?.source_id).toBe("post-1");
+  });
+
+  it.each(["recent", "oldest", "comments", "pending", "risk"])("paginates source sort %s with tied timestamps and scopes cursors to the active filters", async sourceSort => {
+    const inserted = await db.insert(socialItems).values(Array.from({ length: 28 }, (_, group) => Array.from({ length: group % 3 + 1 }, (_, item) => ({
+      platform: group % 2 ? "facebook" : "youtube", externalId: `sort-${group}-${item}`, rootExternalId: group === 0 ? null : `post-${String(group).padStart(2, "0")}`,
+      text: "Sentetik sıralama yorumu", analysisStatus: "complete", ingestedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, Math.floor(group / 3))),
+    }))).flat()).returning({ id: socialItems.id });
+    await db.insert(socialAnalyses).values(inserted.map((item, index) => ({ itemId: item.id, model: "fixture", promptVersion: "fixture", inputHash: "a".repeat(64),
+      needsReview: index % 2 === 0, severity: index % 4 === 0 ? 80 : 0 })));
+    const first = await commentSources({ sourceSort });
+    const second = await commentSources({ sourceSort, sourceAfter: first.next! });
+    const all = [...first.rows, ...second.rows];
+    expect(first.rows).toHaveLength(24);
+    expect(first.total).toBe(28);
+    expect(second.rows).toHaveLength(4);
+    expect(second.next).toBeNull();
+    expect(new Set(all.map(row => row.key)).size).toBe(28);
+    const values = all.map(row => sourceSort === "comments" ? row.comments : sourceSort === "pending" ? row.pending : sourceSort === "risk" ? row.risk : new Date(row.latest_at).getTime());
+    expect(values).toEqual([...values].sort((a, b) => sourceSort === "oldest" ? a - b : b - a));
+    const changedSort = sourceSort === "oldest" ? "recent" : "oldest";
+    expect((await commentSources({ sourceSort: changedSort, sourceAfter: first.next! })).rows.map(row => row.key))
+      .toEqual((await commentSources({ sourceSort: changedSort })).rows.map(row => row.key));
+    expect((await commentSources({ sourceSort, sourceFilter: "pending", sourceAfter: first.next! })).rows.map(row => row.key))
+      .toEqual((await commentSources({ sourceSort, sourceFilter: "pending" })).rows.map(row => row.key));
+    expect(mocks.analyze).not.toHaveBeenCalled();
   });
 
   it("filters triage by owned account context while giving human decisions precedence", async () => {
