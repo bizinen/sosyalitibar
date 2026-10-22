@@ -49,11 +49,19 @@ export function commentConditions(p: CommentParams) {
   if (p.needsReview === "true") conditions.push(eq(socialAnalyses.needsReview, true));
   if (p.q?.trim()) conditions.push(ilike(socialItems.text, `%${p.q.trim().slice(0, 120)}%`));
   if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(p.connection || "")) conditions.push(eq(socialItems.connectionId, p.connection!));
-  if (p.target) conditions.push(p.view === "human" || p.view === "confirmed"
+  if (p.target) {
+    const assessment = sql`(select r.assessment from item_review_events r where r.item_id = ${socialItems.id}
+      and r.analysis_revision = ${socialItems.analysisRevision} order by r.sequence desc limit 1)`;
+    conditions.push(p.view === "human" || p.view === "confirmed"
     ? sql`exists (select 1 from item_review_events r where r.item_id = ${socialItems.id}
         and r.analysis_revision = ${socialItems.analysisRevision} and r.assessment->>'matchedTarget' = ${p.target}
         and r.id = (select last_review.id from item_review_events last_review where last_review.item_id = ${socialItems.id} order by last_review.sequence desc limit 1))`
-    : eq(socialAnalyses.matchedTarget, p.target));
+    : sql`case when ${assessment} is not null then ${assessment}->>'matchedTarget' = ${p.target}
+      when ${socialAnalyses.triageLabel} is null then ${socialAnalyses.matchedTarget} = ${p.target}
+      else coalesce(${socialItems.raw}->>'external_source', 'false') <> 'true' and exists (
+        select 1 from connection_targets ct join monitoring_targets mt on mt.id = ct.target_id
+        where ct.connection_id = ${socialItems.connectionId} and mt.enabled is true and mt.name = ${p.target}) end`);
+  }
   if (["pending", "processing", "retry", "complete", "dead"].includes(p.analysis || "")) conditions.push(eq(socialItems.analysisStatus, p.analysis!));
   for (const [value, end] of [[p.from, false], [p.to, true]] as const) {
     if (value && /^\d{4}-\d{2}-\d{2}$/.test(value)) {

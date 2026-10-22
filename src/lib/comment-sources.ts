@@ -28,7 +28,7 @@ export async function commentSources(p: CommentParams, selected = false) {
   const result = await db.execute<SourceRow>(sql`
     with grouped as (
       select i.platform, i.root_external_id as source_id, count(*)::int as comments,
-        count(*) filter (where i.review_status = 'new' and i.source_unavailable_at is null)::int as pending,
+        count(*) filter (where i.review_status = 'new' and a.needs_review is true and i.source_unavailable_at is null)::int as pending,
         count(*) filter (where a.severity >= 70 or a.triage_label = 'acil_inceleme')::int as risk,
         max(i.ingested_at) as latest_at
       from social_items i left join social_analyses a on a.item_id = i.id

@@ -19,7 +19,7 @@ export async function SourceBrowser({ params, connections, selected = false }: {
     return <section className="selected-source" aria-label="İncelenen paylaşım">
       <div className="selected-source-nav"><Link className="text-link" href={href({ mode: "sources" })}>Paylaşım listesine dön</Link><span className="small muted">{row?.source_id === null ? "Kaynağı belirlenemeyen yorumlar" : row?.channel || "Seçilen paylaşım"}</span></div>
       {row ? <><CommentSource raw={row.source_id === null ? { source_post: { text: "Paylaşımı belirlenemeyen yorumlar" } } : row.raw} platform={row.platform} rootId={row.source_id} />
-        <div className="source-counts"><span>{row.comments.toLocaleString("tr-TR")} alınan yorum</span><span>{row.pending.toLocaleString("tr-TR")} incelenmemiş</span><span>{row.risk.toLocaleString("tr-TR")} yüksek öncelik</span></div></>
+        <div className="source-counts"><span>{row.comments.toLocaleString("tr-TR")} alınan yorum</span><span>{row.pending.toLocaleString("tr-TR")} inceleme bekleyen</span><span>{row.risk.toLocaleString("tr-TR")} yüksek öncelik</span></div></>
         : <p className="notice">Bu paylaşım mevcut hesap filtresinde bulunamadı. Paylaşım listesine dönerek yeniden seçebilirsin.</p>}
     </section>;
   }
@@ -40,7 +40,7 @@ export async function SourceBrowser({ params, connections, selected = false }: {
         <div className="source-tile-account"><span className={`review-platform ${row.platform}`}>{platform}</span><strong>{row.source_id === null ? "Kaynağı belirlenemeyen yorumlar" : row.channel || "Kanal bilgisi alınamadı"}</strong></div>
         <CommentSource raw={row.source_id === null ? { source_post: { text: "Paylaşımı belirlenemeyen yorumlar" } } : row.raw} platform={row.platform} rootId={row.source_id} titleHref={commentHref(row.key)} />
         <div className="source-tile-body"><div className="source-counts"><Link href={commentHref(row.key)} prefetch={false}><strong>{row.comments.toLocaleString("tr-TR")}</strong> alınan yorum</Link>
-          <Link href={commentHref(row.key, "pending")} prefetch={false}><strong>{row.pending.toLocaleString("tr-TR")}</strong> incelenmemiş</Link>
+          <Link href={commentHref(row.key, "pending")} prefetch={false}><strong>{row.pending.toLocaleString("tr-TR")}</strong> inceleme bekleyen</Link>
           <Link className={row.risk > 0 ? "source-risk" : undefined} href={commentHref(row.key, "risk")} prefetch={false}><strong>{row.risk.toLocaleString("tr-TR")}</strong> yüksek öncelik</Link></div>
           <p className="source-date small muted">{row.comments ? "Son yorum alımı" : "İzlemeye eklendi"}: {new Date(row.latest_at).toLocaleString("tr-TR", { timeZone: "Europe/Istanbul", day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })}</p>
           <p className="source-scan-note small muted" aria-hidden={row.comments > 0 || undefined}>{!row.comments ? <>Henüz yorum alınmadı. Tarama durumunu <Link href="/settings/videos" className="text-link">izleme listesinde</Link> görebilirsin.</> : null}</p>
