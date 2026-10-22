@@ -16,6 +16,66 @@ afterEach(() => {
 });
 
 describe("scheduler independent workers", () => {
+  it("reports work failures inside HTTP 200 responses and backs off when no work succeeds", async () => {
+    const fetchMock = vi.fn(async (url) => ({ ok: true, text: async () => JSON.stringify(
+      url.endsWith("process-videos") ? { results: [{ error: "source_read_failed" }] }
+        : url.endsWith("process-analyses") ? { claimed: 8, succeeded: 0, failed: 8, hasMore: true } : {}) }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { runScheduler } = await import("../scripts/scheduler.mjs");
+    const controller = new AbortController();
+    const running = runScheduler(controller.signal);
+    try {
+      await vi.advanceTimersByTimeAsync(9999);
+      const heartbeats = fetchMock.mock.calls.filter(([url]) => url.endsWith("/heartbeat")).map(([, init]) => JSON.parse(init.body));
+      expect(heartbeats.find(row => row.job === "process-videos").succeeded).toBe(false);
+      expect(heartbeats.find(row => row.job === "process-analyses").succeeded).toBe(false);
+      expect(fetchMock.mock.calls.filter(([url]) => url.endsWith("process-analyses"))).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(fetchMock.mock.calls.filter(([url]) => url.endsWith("process-analyses"))).toHaveLength(2);
+    } finally { controller.abort(); await running; }
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("drains full successful packages promptly and returns to idle polling after an empty package", async () => {
+    let packages = 0;
+    const fetchMock = vi.fn(async (url) => ({ ok: true, text: async () => JSON.stringify(
+      url.endsWith("process-events") && ++packages < 3 ? { claimed: 8, succeeded: 8, hasMore: true } : { claimed: 0 }) }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { runScheduler } = await import("../scripts/scheduler.mjs");
+    const controller = new AbortController();
+    const running = runScheduler(controller.signal);
+    try {
+      await vi.advanceTimersByTimeAsync(200);
+      expect(packages).toBe(3);
+      await vi.advanceTimersByTimeAsync(4999);
+      expect(packages).toBe(3);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(packages).toBe(4);
+    } finally { controller.abort(); await running; }
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("drains maintenance debt in bounded bursts and resumes the daily interval when finished", async () => {
+    let batches = 0;
+    const fetchMock = vi.fn(async (url) => ({ ok: true, text: async () => JSON.stringify(
+      url.endsWith("maintenance") ? { batchMayHaveMore: ++batches <= 10 } : {}) }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { runScheduler } = await import("../scripts/scheduler.mjs");
+    const controller = new AbortController();
+    const running = runScheduler(controller.signal);
+    try {
+      await vi.advanceTimersByTimeAsync(45000);
+      expect(batches).toBe(10);
+      await vi.advanceTimersByTimeAsync(59999);
+      expect(batches).toBe(10);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(batches).toBe(11);
+      await vi.advanceTimersByTimeAsync(60000);
+      expect(batches).toBe(11);
+    } finally { controller.abort(); await running; }
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("imports without starting network calls or requiring credentials", async () => {
     vi.stubEnv("CRON_SECRET", "");
     const fetchMock = vi.fn();

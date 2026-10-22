@@ -12,5 +12,5 @@ export async function POST(req: Request) {
   const recovered = await requeueStaleAnalysisLocks();
   const jobs = await claimAnalysisJobs(cfg.policy.batchSize);
   const results = await processAnalysisJobs(jobs, cfg);
-  return NextResponse.json({ recovered, claimed: jobs.length, succeeded: results.filter((x) => x.processed).length, failed: results.filter((x) => !x.processed).length });
+  return NextResponse.json({ recovered, claimed: jobs.length, hasMore: jobs.length === cfg.policy.batchSize, succeeded: results.filter((x) => x.processed).length, failed: results.filter((x) => !x.processed).length });
 }

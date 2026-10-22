@@ -5,5 +5,7 @@ import { collectWatchedVideos } from "@/lib/watched-videos";
 
 export async function POST(req: Request) {
   if (!safeEqual(req.headers.get("authorization") ?? "", `Bearer ${env().CRON_SECRET}`)) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  return NextResponse.json({ results: await collectWatchedVideos() });
+  const results = await collectWatchedVideos();
+  return NextResponse.json({ results, claimed: results.length, hasMore: results.length === Math.min(2, env().SYNC_CONCURRENCY),
+    succeeded: results.filter((row) => !("error" in row)).length, failed: results.filter((row) => "error" in row).length });
 }

@@ -58,13 +58,17 @@ async function safePost(path, event, signal, timeoutMs, body) {
 
 async function cycle(path, event, intervalMs, timeoutMs, signal) {
   let failures = 0;
+  let maintenanceBatches = 0;
   while (!signal.aborted) {
     const started = Date.now();
     const result = await safePost(path, `${event}_failed`, signal, timeoutMs);
+    const failed = result === null || result.failed > 0 || result.tokenRotation?.failed > 0
+      || result.results?.some((row) => row.error || row.ok === false || row.failedTasks > 0 || row.retryTasks > 0);
     if (!signal.aborted) await safePost("/api/jobs/heartbeat", "worker.heartbeat_failed", signal, 10000, {
-      job: path.split("/").at(-1), succeeded: result !== null, intervalMs, timeoutMs,
+      job: path.split("/").at(-1), succeeded: !failed, intervalMs, timeoutMs,
     });
-    failures = result === null ? failures + 1 : 0;
+    const progressed = result?.succeeded > 0 || result?.delivered > 0;
+    failures = failed && !progressed ? failures + 1 : 0;
     if (result && (result.claimed > 0 || !path.includes("/process-"))) {
       emit("info", event, { result });
     }
@@ -73,6 +77,12 @@ async function cycle(path, event, intervalMs, timeoutMs, signal) {
       let waitMs = path.endsWith("/reconcile")
         ? result ? (result.results?.length ? pollMs : Math.min(intervalMs, 60_000)) : intervalMs
         : path.includes("/process-") ? intervalMs : Math.max(pollMs, intervalMs - (Date.now() - started));
+      if (path.includes("/process-") && result?.hasMore && progressed) waitMs = 100;
+      if (path.endsWith("/maintenance") && result && (result.batchMayHaveMore || result.tokenRotation?.remaining > result.tokenRotation?.failed)) {
+        // Keep each HTTP batch bounded and yield periodically while draining retention debt.
+        maintenanceBatches = (maintenanceBatches + 1) % 10;
+        waitMs = maintenanceBatches ? pollMs : 60_000;
+      } else maintenanceBatches = 0;
       if (failures) waitMs = Math.max(waitMs, Math.min(60_000, pollMs * 2 ** Math.min(failures, 6)));
       await new Promise((resolve) => {
         const finish = () => {
