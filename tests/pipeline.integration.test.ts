@@ -26,6 +26,7 @@ import { commentRows, sourceKey } from "@/lib/comment-feed";
 import { commentSources } from "@/lib/comment-sources";
 import { PUT as saveMetaSettings } from "@/app/api/settings/meta/route";
 import { GET as oauthCallback } from "@/app/api/meta/callback/route";
+import { PATCH as configureVideo } from "@/app/api/videos/[id]/route";
 import { POST as pollUpdates, GET as pollLegacyUpdates } from "@/app/api/items/updates/route";
 import * as auditModule from "@/lib/audit";
 import { POST as retryDeadAnalysis } from "@/app/api/admin/dead-letter/analysis/[id]/route";
@@ -701,6 +702,21 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
     expect((await pollUpdates(make([], "https://evil.test"))).status).toBe(403);
     expect((await pollUpdates(request({ after, ids: [], extra: "x".repeat(65536) }))).status).toBe(400);
     expect((await pollLegacyUpdates(new Request(`http://localhost:3000/api/items/updates?after=${after}&ids=${rows[0]!.id}`))).status).toBe(200);
+  });
+
+  it("edits scan limits without deleting history, resuming a pause or replacing a running scan", async () => {
+    const [video] = await db.insert(watchedVideos).values({ platform: "instagram", provider: "apify", externalId: "public:instagram:AuditPost",
+      url: "https://www.instagram.com/p/AuditPost", status: "paused", lastSyncedAt: new Date(), availableAt: new Date(Date.now() + 3600000) }).returning();
+    const settings = { resultsLimit: 5000, maxChargeCents: 200, pollMinutes: 120 };
+    const response = await configureVideo(request({ action: "configure", revision: 1, settings }), params(video!.id));
+    expect(response.status).toBe(200);
+    const saved = await db.query.watchedVideos.findFirst({ where: eq(watchedVideos.id, video!.id) });
+    expect(saved).toMatchObject({ ...settings, status: "paused", revision: 2 });
+    expect((await configureVideo(request({ action: "configure", revision: 1, settings }), params(video!.id))).status).toBe(409);
+    await db.update(watchedVideos).set({ progressEncrypted: encryptSecret("unfinished") }).where(eq(watchedVideos.id, video!.id));
+    expect((await configureVideo(request({ action: "configure", revision: 2, settings }), params(video!.id))).status).toBe(409);
+    expect((await configureVideo(request({ action: "configure", revision: 2, settings: { ...settings, resultsLimit: 10001 } }), params(video!.id))).status).toBe(400);
+    expect(mocks.analyze).not.toHaveBeenCalled();
   });
 
   it("accepts an OAuth nonce once, including parallel replay attempts", async () => {

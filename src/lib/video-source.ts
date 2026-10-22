@@ -1,3 +1,11 @@
+import { z } from "zod";
+
+export const videoScanSettingsSchema = z.object({
+  resultsLimit: z.number().int().min(1).max(10000),
+  pollMinutes: z.number().int().min(15).max(10080),
+  maxChargeCents: z.number().int().min(10).max(10000),
+}).strict();
+
 export type VideoPlatform = "youtube" | "facebook" | "instagram";
 
 export function videoSource(platform: VideoPlatform, value: string, resourceId?: string, publicSource = false) {

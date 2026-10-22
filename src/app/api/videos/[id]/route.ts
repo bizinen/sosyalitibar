@@ -8,6 +8,7 @@ import { assertSameOrigin } from "@/lib/security";
 import { readResponseBody } from "@/lib/http-body";
 import { decryptSecret, encryptSecret } from "@/lib/crypto";
 import { abortApifyRun, apifyProgressSchema } from "@/lib/apify-videos";
+import { videoScanSettingsSchema } from "@/lib/video-source";
 
 export async function PATCH(req: Request, context: { params: Promise<{ id: string }> }) {
   if (!(await isAdmin())) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
@@ -17,8 +18,8 @@ export async function PATCH(req: Request, context: { params: Promise<{ id: strin
   let body: unknown;
   try { body = JSON.parse(new TextDecoder().decode(await readResponseBody(new Response(req.body), 2048))); }
   catch { return NextResponse.json({ error: "invalid_body" }, { status: 400 }); }
-  const parsed = z.object({ action: z.enum(["pause", "resume", "collect", "remove", "recover", "restart"]), revision: z.number().int().positive(),
-    runId: z.string().regex(/^[A-Za-z0-9]{10,40}$/).optional() }).strict().safeParse(body);
+  const parsed = z.object({ action: z.enum(["pause", "resume", "collect", "remove", "recover", "restart", "configure"]), revision: z.number().int().positive(),
+    runId: z.string().regex(/^[A-Za-z0-9]{10,40}$/).optional(), settings: videoScanSettingsSchema.optional() }).strict().safeParse(body);
   if (!parsed.success) return NextResponse.json({ error: "invalid_body" }, { status: 400 });
   try {
     const result = await db.transaction(async (tx) => {
@@ -26,6 +27,16 @@ export async function PATCH(req: Request, context: { params: Promise<{ id: strin
       if (!current || current.status === "removed") return "not_found";
       if (current.revision !== parsed.data.revision) return "conflict";
       const action = parsed.data.action;
+      if (action === "configure") {
+        if (current.provider !== "apify" || !parsed.data.settings) return "invalid_settings";
+        if (current.lockId || current.progressEncrypted) return "source_busy";
+        const settings = parsed.data.settings;
+        await tx.update(watchedVideos).set({ ...settings, revision: current.revision + 1, updatedAt: new Date(),
+          availableAt: current.lastSyncedAt ? new Date(Math.max(Date.now(), current.lastSyncedAt.getTime() + settings.pollMinutes * 60000)) : current.availableAt,
+        }).where(and(eq(watchedVideos.id, id), eq(watchedVideos.revision, parsed.data.revision)));
+        await tx.insert(auditLogs).values({ actor: "admin", action: "video.configure", entityType: "watched_video", entityId: id, metadata: settings });
+        return { saved: true, abort: undefined, abortUnconfirmed: false };
+      }
       let abort: { runId: string; key: string } | undefined;
       let abortUnconfirmed = false;
       if ((action === "pause" || action === "remove") && current.provider === "apify" && current.progressEncrypted && current.apiKeyEncrypted) {

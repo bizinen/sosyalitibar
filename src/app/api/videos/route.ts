@@ -7,15 +7,15 @@ import { isAdmin } from "@/lib/auth";
 import { assertSameOrigin } from "@/lib/security";
 import { readResponseBody } from "@/lib/http-body";
 import { encryptSecret } from "@/lib/crypto";
-import { videoSource } from "@/lib/video-source";
+import { videoSource, videoScanSettingsSchema } from "@/lib/video-source";
 
 const schema = z.object({ platform: z.enum(["youtube", "facebook", "instagram"]), url: z.string().trim().url().max(2048),
   resourceId: z.string().trim().max(100).optional(), connectionId: z.string().uuid().optional(),
   apiKey: z.string().trim().max(4096).refine((key) => !/\s/.test(key)).optional(),
   provider: z.enum(["official", "apify"]).default("official"),
-  resultsLimit: z.number().int().min(1).max(10000).default(1000),
-  pollMinutes: z.number().int().min(15).max(10080).default(60),
-  maxChargeCents: z.number().int().min(10).max(10000).default(100),
+  resultsLimit: videoScanSettingsSchema.shape.resultsLimit.default(1000),
+  pollMinutes: videoScanSettingsSchema.shape.pollMinutes.default(60),
+  maxChargeCents: videoScanSettingsSchema.shape.maxChargeCents.default(100),
   sourceText: z.string().trim().max(20000).optional(), channelName: z.string().trim().max(256).optional(),
 }).strict();
 
