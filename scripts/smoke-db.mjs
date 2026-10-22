@@ -94,6 +94,9 @@ try {
         'social_items_parent_idx',
         'social_items_ingested_id_idx',
         'social_items_analysis_queue_idx',
+        'social_items_analysis_claim_idx',
+        'webhook_events_claim_idx',
+        'alert_outbox_claim_idx',
         'webhook_events_queue_received_idx',
         'alert_outbox_queue_created_idx',
         'social_connections_sync_attempt_idx',
@@ -106,7 +109,7 @@ try {
         'watched_videos_channel_idx'
       )
   `;
-  assert(indexes.length === 14, `beklenen kritik index sayısı 14, bulunan ${indexes.length}`);
+  assert(indexes.length === 17, `beklenen kritik index sayısı 17, bulunan ${indexes.length}`);
 
   const [connectionTargetsUnique] = await sql`
     select count(*)::int as count
