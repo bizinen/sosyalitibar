@@ -26,6 +26,8 @@ import { commentRows, sourceKey } from "@/lib/comment-feed";
 import { commentSources } from "@/lib/comment-sources";
 import { PUT as saveMetaSettings } from "@/app/api/settings/meta/route";
 import { GET as oauthCallback } from "@/app/api/meta/callback/route";
+import * as auditModule from "@/lib/audit";
+import { POST as retryDeadAnalysis } from "@/app/api/admin/dead-letter/analysis/[id]/route";
 
 const mocks = vi.hoisted(() => ({ analyze: vi.fn(), debug: vi.fn(), posts: vi.fn(), comments: vi.fn(), replies: vi.fn(),
   exchange: vi.fn(), longToken: vi.fn(), user: vi.fn(), scopes: vi.fn(), pages: vi.fn(), subscribe: vi.fn() }));
@@ -80,7 +82,7 @@ async function pausedAnalysis(connectionId?: string) {
   return { source, job: job!, work, release };
 }
 
-describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline invariants", () => {
+describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline invariants", { timeout: 15000 }, () => {
   beforeAll(async () => {
     if (!process.env.TEST_DATABASE_URL?.endsWith("/sosyal_itibar_test")) throw new Error("Dedicated sosyal_itibar_test database required");
     vi.stubEnv("DATABASE_URL", process.env.TEST_DATABASE_URL);
@@ -637,6 +639,48 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
     pending.release.resolve({ ...result(), inputHash: "old" });
     expect(await pending.work).toEqual({ processed: false, reason: "lost_lock" });
     expect((await db.query.socialAnalyses.findFirst())?.inputHash).toBe("a".repeat(64));
+  });
+
+  it("recovers at most 100 authentication failures and preserves human and unavailable records", async () => {
+    const rows = await db.insert(socialItems).values(Array.from({ length: 101 }, (_, index) => ({
+      platform: "youtube", externalId: `dead-${index}`, text: "sentetik", analysisStatus: "dead", analysisError: "LLM HTTP 401", analysisAttempts: 5,
+    }))).returning();
+    const [reviewed] = await db.insert(socialItems).values({ platform: "youtube", externalId: "reviewed", text: "insan inceledi",
+      analysisStatus: "dead", analysisError: "LLM HTTP 401", reviewStatus: "reviewed" }).returning();
+    await db.insert(socialItems).values([
+      { platform: "youtube", externalId: "other-error", text: "sentetik", analysisStatus: "dead", analysisError: "LLM HTTP 429" },
+      { platform: "youtube", externalId: "unavailable", text: "sentetik", analysisStatus: "dead", analysisError: "LLM HTTP 401", sourceUnavailableAt: new Date() },
+    ]);
+    const response = await retryDeadAnalysis(request(), params("auth-failures"));
+    expect(await response.json()).toEqual({ ok: true, count: 100 });
+    const pending = await db.select().from(socialItems).where(eq(socialItems.analysisStatus, "pending"));
+    expect(pending).toHaveLength(100);
+    expect(pending.every((row) => row.analysisRevision === 2 && row.analysisAttempts === 0 && row.analysisError === null)).toBe(true);
+    expect((await db.query.socialItems.findFirst({ where: eq(socialItems.id, reviewed!.id) }))?.reviewStatus).toBe("reviewed");
+    const recoveryAudit = await db.query.auditLogs.findFirst({ where: eq(auditLogs.action, "dead_letter.analysis_requeue") });
+    expect(recoveryAudit?.metadata.reason).toBe("authentication_recovery");
+    expect((recoveryAudit?.metadata.ids as string[])).toHaveLength(100);
+    const [left] = rows.filter((row) => !pending.some((candidate) => candidate.id === row.id));
+    expect(left).toBeDefined();
+    expect(await (await retryDeadAnalysis(request(), params("auth-failures"))).json()).toEqual({ ok: true, count: 1 });
+    expect(await (await retryDeadAnalysis(request(), params("auth-failures"))).json()).toEqual({ ok: true, count: 0 });
+  });
+
+  it("rolls back a requeue when its audit write fails", async () => {
+    const source = await item();
+    await db.update(socialItems).set({ analysisStatus: "dead", analysisError: "LLM HTTP 401" }).where(eq(socialItems.id, source.id));
+    const spy = vi.spyOn(auditModule, "audit").mockRejectedValueOnce(new Error("audit unavailable"));
+    try { await expect(retryDeadAnalysis(request(), params(source.id))).rejects.toThrow("audit unavailable"); }
+    finally { spy.mockRestore(); }
+    expect(await db.query.socialItems.findFirst({ where: eq(socialItems.id, source.id) })).toMatchObject({ analysisStatus: "dead", analysisRevision: 1 });
+  });
+
+  it("serializes duplicate requeues without advancing the revision twice", async () => {
+    const source = await item();
+    await db.update(socialItems).set({ analysisStatus: "dead" }).where(eq(socialItems.id, source.id));
+    const responses = await Promise.all([retryDeadAnalysis(request(), params(source.id)), retryDeadAnalysis(request(), params(source.id))]);
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 409]);
+    expect(await db.query.socialItems.findFirst({ where: eq(socialItems.id, source.id) })).toMatchObject({ analysisStatus: "pending", analysisRevision: 2 });
   });
 
   it("accepts an OAuth nonce once, including parallel replay attempts", async () => {

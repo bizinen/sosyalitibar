@@ -6,14 +6,17 @@ export function OperationsActions() {
   const router = useRouter();
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState("");
-  async function run(kind: "health" | "sync" | "queues") {
+  async function run(kind: "health" | "sync" | "queues" | "auth") {
+    if (kind === "auth" && !window.confirm("LLM erişimini düzelttikten sonra yalnız 401 hatalı, henüz incelenmemiş en fazla 100 yorumu yeniden kuyruğa al. İşlendiklerinde LLM kullanımı ücretlendirilir. Devam edilsin mi?")) return;
     setBusy(kind); setMessage("");
-    const url = kind === "health" ? "/api/meta/health" : kind === "sync" ? "/api/meta/sync-comments" : "/api/admin/run-queues";
+    const url = kind === "health" ? "/api/meta/health" : kind === "sync" ? "/api/meta/sync-comments" : kind === "auth" ? "/api/admin/dead-letter/analysis/auth-failures" : "/api/admin/run-queues";
     try {
       const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
       const body = await res.json();
       if (!res.ok) throw new Error(body?.error || "İşlem başarısız");
-      if (kind === "sync") {
+      if (kind === "auth") {
+        setMessage(`${Number(body.count) || 0} yorum yeniden analiz kuyruğuna alındı. Sonuçları ve worker durumunu bu ekrandan takip et.`);
+      } else if (kind === "sync") {
         const failures = Array.isArray(body.results) ? body.results.filter((x: { ok?: boolean }) => x.ok === false).length : 0;
         const processed = Array.isArray(body.results) ? body.results.length : 0;
         const limited = Array.isArray(body.results) ? body.results.filter((x: { coverageLimited?: boolean }) => x.coverageLimited).length : 0;
@@ -39,6 +42,7 @@ export function OperationsActions() {
       <button className="btn" disabled={Boolean(busy)} onClick={() => run("health")}>Bağlantıları kontrol et</button>
       <button className="btn" disabled={Boolean(busy)} onClick={() => run("sync")}>Yorumları al</button>
       <button className="btn" disabled={Boolean(busy)} onClick={() => run("queues")}>Bekleyen işleri işle</button>
+      <button className="btn" disabled={Boolean(busy)} onClick={() => run("auth")}>401 hatalı analizleri yeniden kuyruğa al</button>
     </div></details>
     {message ? <div className="action-feedback" role="status">{message}</div> : null}
   </div>;
