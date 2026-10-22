@@ -20,11 +20,14 @@ export async function POST(req: Request) {
   const alertCutoff = new Date(now - cfg.RETENTION_ALERT_DAYS * day);
 
   const batchLimit = 1000;
-  const retainedContext = sql`case when jsonb_typeof(${socialItems.raw}->'source_post') = 'object'
+  const retainedContext = sql`nullif((case when jsonb_typeof(${socialItems.raw}->'source_post') = 'object'
     then jsonb_build_object('source_post', jsonb_build_object('id', ${socialItems.raw}->'source_post'->'id',
       'text', ${socialItems.raw}->'source_post'->'text')) || case when ${socialItems.raw}->'context_incomplete' = 'true'::jsonb
         then jsonb_build_object('context_incomplete', true) else '{}'::jsonb end
-    when ${socialItems.raw}->'context_incomplete' = 'true'::jsonb then jsonb_build_object('context_incomplete', true) else null end`;
+    when ${socialItems.raw}->'context_incomplete' = 'true'::jsonb then jsonb_build_object('context_incomplete', true) else '{}'::jsonb end)
+    || case when ${socialItems.raw}->'external_source' = 'true'::jsonb then jsonb_strip_nulls(jsonb_build_object(
+      'external_source', true, 'source_channel', ${socialItems.raw}->'source_channel',
+      'watched_video_id', ${socialItems.raw}->'watched_video_id')) else '{}'::jsonb end, '{}'::jsonb)`;
   const oauth = await db.delete(oauthNonces).where(inArray(oauthNonces.id, db.select({ id: oauthNonces.id }).from(oauthNonces)
     .where(lt(oauthNonces.expiresAt, oauthCutoff)).orderBy(asc(oauthNonces.id)).limit(batchLimit).for("update", { skipLocked: true }))).returning({ id: oauthNonces.id });
   const rate = await db.delete(authRateLimits).where(inArray(authRateLimits.keyHash, db.select({ key: authRateLimits.keyHash }).from(authRateLimits)
