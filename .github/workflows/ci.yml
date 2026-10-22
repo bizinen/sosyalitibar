@@ -29,6 +29,8 @@ jobs:
           node-version: 22
       - name: Install
         run: npm ci --no-audit --no-fund
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=moderate
       - name: Migrate test database
         run: npm run db:migrate
       - name: Verify migration rerun
