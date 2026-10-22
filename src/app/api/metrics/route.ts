@@ -1,10 +1,12 @@
 import { NextResponse } from "next/server";
 import { eq, sql } from "drizzle-orm";
-import { alertOutbox, socialAnalyses, socialConnections, socialItems, webhookEvents, workerHeartbeats } from "@/db/schema";
+import { alertOutbox, analysisProviderState, socialAnalyses, socialConnections, socialItems, watchedVideos, webhookEvents, workerHeartbeats } from "@/db/schema";
 import { env } from "@/lib/config";
 import { db } from "@/lib/db";
 import { safeEqual } from "@/lib/security";
 import { WORKER_JOBS } from "@/lib/worker-health";
+import { getLlmSettings } from "@/lib/llm-settings";
+import { analysisProviderKey } from "@/lib/batch-triage";
 
 function metric(name: string, value: number, labels?: Record<string, string>) {
   const labelText = labels && Object.keys(labels).length
@@ -19,7 +21,8 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
 
-  const [webhookStatuses, analysisStatuses, alertStatuses, connectionStatuses, totals, latency, oldestWebhook, oldestAnalysis, oldestAlert, syncLease, heartbeats] = await Promise.all([
+  const provider = await getLlmSettings().then(cfg => ({ key: analysisProviderKey(cfg), readable: true }), () => ({ key: "", readable: false }));
+  const [webhookStatuses, analysisStatuses, alertStatuses, connectionStatuses, totals, latency, oldestWebhook, oldestAnalysis, oldestAlert, syncLease, heartbeats, sources, sourceAges, providerState] = await Promise.all([
     db.select({ status: webhookEvents.status, count: sql<number>`count(*)::int` }).from(webhookEvents).groupBy(webhookEvents.status),
     db.select({ status: socialItems.analysisStatus, count: sql<number>`count(*)::int` }).from(socialItems).groupBy(socialItems.analysisStatus),
     db.select({ status: alertOutbox.status, count: sql<number>`count(*)::int` }).from(alertOutbox).groupBy(alertOutbox.status),
@@ -38,18 +41,43 @@ export async function GET(req: Request) {
       oldestSeconds: sql<number>`greatest(coalesce(extract(epoch from (now() - min(${socialConnections.syncLockedAt}) filter (where ${socialConnections.syncLockedAt} is not null))), 0), 0)::float8`,
     }).from(socialConnections),
     db.select().from(workerHeartbeats),
+    db.select({ platform: watchedVideos.platform, provider: watchedVideos.provider, kind: watchedVideos.sourceKind,
+      status: watchedVideos.status, count: sql<number>`count(*)::int` }).from(watchedVideos)
+      .groupBy(watchedVideos.platform, watchedVideos.provider, watchedVideos.sourceKind, watchedVideos.status),
+    db.select({ platform: watchedVideos.platform, provider: watchedVideos.provider, kind: watchedVideos.sourceKind,
+      overdueSeconds: sql<number>`greatest(coalesce(extract(epoch from (now() - min(${watchedVideos.availableAt}))), 0), 0)::float8`,
+      scanAgeSeconds: sql<number>`greatest(coalesce(extract(epoch from (now() - min(coalesce(${watchedVideos.lastSyncedAt}, ${watchedVideos.createdAt})))), 0), 0)::float8`,
+    }).from(watchedVideos).where(sql`${watchedVideos.status} = 'active' and (${watchedVideos.channelId} is null
+      or exists (select 1 from watched_videos channel where channel.id = watched_videos.channel_id and channel.status = 'active'))`)
+      .groupBy(watchedVideos.platform, watchedVideos.provider, watchedVideos.sourceKind),
+    db.select().from(analysisProviderState).where(eq(analysisProviderState.key, provider.key)),
   ]);
 
   const lines = [
     "# HELP sosyal_itibar_worker_stale Worker job has no recent completed attempt, including empty queues.",
     "# TYPE sosyal_itibar_worker_stale gauge",
     ...WORKER_JOBS.map((job) => { const heartbeat = heartbeats.find((row) => row.job === job); return metric("sosyal_itibar_worker_stale", !heartbeat || Date.now() - heartbeat.lastAttemptAt.getTime() > heartbeat.staleAfterMs ? 1 : 0, { job }); }),
-    "# HELP sosyal_itibar_worker_last_success_timestamp_seconds Last successful HTTP job execution; not proof of provider delivery.",
+    "# HELP sosyal_itibar_worker_last_success_timestamp_seconds Last completed job attempt without reported work failures; not a full coverage guarantee.",
     "# TYPE sosyal_itibar_worker_last_success_timestamp_seconds gauge",
     ...WORKER_JOBS.map((job) => metric("sosyal_itibar_worker_last_success_timestamp_seconds", (heartbeats.find((row) => row.job === job)?.lastSuccessAt?.getTime() ?? 0) / 1000, { job })),
-    "# HELP sosyal_itibar_worker_last_attempt_failed Last job HTTP attempt failed or job never reported.",
+    "# HELP sosyal_itibar_worker_last_attempt_failed Last job attempt reported an HTTP or work failure, or never reported.",
     "# TYPE sosyal_itibar_worker_last_attempt_failed gauge",
     ...WORKER_JOBS.map((job) => metric("sosyal_itibar_worker_last_attempt_failed", heartbeats.find((row) => row.job === job)?.lastSucceeded ? 0 : 1, { job })),
+    "# HELP sosyal_itibar_sources Monitored sources by lifecycle status, including blocked collection.",
+    "# TYPE sosyal_itibar_sources gauge",
+    ...sources.map((row) => metric("sosyal_itibar_sources", row.count, { platform: row.platform, provider: row.provider, kind: row.kind, status: row.status })),
+    "# HELP sosyal_itibar_source_overdue_seconds Oldest scheduled collection delay among enabled sources.",
+    "# TYPE sosyal_itibar_source_overdue_seconds gauge",
+    ...sourceAges.map((row) => metric("sosyal_itibar_source_overdue_seconds", row.overdueSeconds, { platform: row.platform, provider: row.provider, kind: row.kind })),
+    "# HELP sosyal_itibar_source_scan_age_seconds Oldest completed full scan age, or source age if never completed.",
+    "# TYPE sosyal_itibar_source_scan_age_seconds gauge",
+    ...sourceAges.map((row) => metric("sosyal_itibar_source_scan_age_seconds", row.scanAgeSeconds, { platform: row.platform, provider: row.provider, kind: row.kind })),
+    "# HELP sosyal_itibar_analysis_provider_backoff_seconds Current provider cooldown remaining; status 0 denotes a network failure.",
+    "# TYPE sosyal_itibar_analysis_provider_backoff_seconds gauge",
+    metric("sosyal_itibar_analysis_provider_backoff_seconds", Math.max(0, ((providerState[0]?.availableAt.getTime() ?? 0) - Date.now()) / 1000), { status: String(providerState[0]?.lastStatus ?? 0) }),
+    "# HELP sosyal_itibar_analysis_provider_configuration_error Current provider settings could not be read or decrypted.",
+    "# TYPE sosyal_itibar_analysis_provider_configuration_error gauge",
+    metric("sosyal_itibar_analysis_provider_configuration_error", provider.readable ? 0 : 1),
     "# HELP sosyal_itibar_social_items_total Total ingested social items.",
     "# TYPE sosyal_itibar_social_items_total gauge",
     metric("sosyal_itibar_social_items_total", totals[0]?.items ?? 0),

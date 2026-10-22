@@ -25,6 +25,30 @@ groups:
         annotations:
           summary: "Sosyal İtibar metrics endpointine erişilemiyor"
           description: "App/DB erişimini ve metrics Bearer kimlik bilgisini kontrol edin."
+      - alert: SosyalItibarSourceBlocked
+        expr: sosyal_itibar_sources{status="blocked"} > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Kaynak yorum taraması müdahale bekliyor"
+          description: "{{ $labels.platform }} / {{ $labels.provider }} kaynak hatasını giderip kontrollü yeniden tarama başlatın."
+      - alert: SosyalItibarAnalysisProviderConfiguration
+        expr: sosyal_itibar_analysis_provider_backoff_seconds{status=~"401|403|404"} > 0 or sosyal_itibar_analysis_provider_configuration_error == 1
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "AI sağlayıcısı yapılandırma hatası nedeniyle bekletiliyor"
+          description: "Seçili model, API adresi, API/şifreleme anahtarı ve izinleri kontrol edin; yorum deneme hakları korunuyor."
+      - alert: SosyalItibarSourceOverdue
+        expr: sosyal_itibar_source_overdue_seconds > 300
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Kaynak yorum taraması gecikiyor"
+          description: "{{ $labels.platform }} / {{ $labels.provider }} tarama kapasitesini, API limitlerini ve worker loglarını kontrol edin."
       - alert: SosyalItibarWebhookBacklog
         expr: sosyal_itibar_queue_oldest_age_seconds{queue="webhook"} > 120
         for: 2m

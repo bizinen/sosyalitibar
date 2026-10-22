@@ -1,6 +1,6 @@
 import { redirect } from "next/navigation";
 import { and, desc, eq, getTableColumns, lt, or, sql } from "drizzle-orm";
-import { alertOutbox, socialItems, webhookEvents, workerHeartbeats } from "@/db/schema";
+import { alertOutbox, socialItems, watchedVideos, webhookEvents, workerHeartbeats } from "@/db/schema";
 import { isAdmin } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { AdminNav } from "@/app/components/AdminNav";
@@ -17,13 +17,14 @@ export default async function OperationsPage({ searchParams }: { searchParams: P
   const p = await searchParams;
   const webhookCursor = decodeItemCursor(p.webhookCursor);
   const analysisCursor = decodeItemCursor(p.analysisCursor);
-  const [webhookCounts, analysisCounts, alertCounts, webhookRows, analysisRows, heartbeats] = await Promise.all([
+  const [webhookCounts, analysisCounts, alertCounts, webhookRows, analysisRows, heartbeats, blockedSources] = await Promise.all([
     db.select({ status: webhookEvents.status, count: sql<number>`count(*)::int` }).from(webhookEvents).groupBy(webhookEvents.status),
     db.select({ status: socialItems.analysisStatus, count: sql<number>`count(*)::int` }).from(socialItems).groupBy(socialItems.analysisStatus),
     db.select({ status: alertOutbox.status, count: sql<number>`count(*)::int` }).from(alertOutbox).groupBy(alertOutbox.status),
     db.select({ ...getTableColumns(webhookEvents), cursorAt: sql<string>`to_char(${webhookEvents.receivedAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')` }).from(webhookEvents).where(and(eq(webhookEvents.status, "dead"), webhookCursor ? or(lt(webhookEvents.receivedAt, sql`${webhookCursor.preciseAt ?? webhookCursor.at.toISOString()}::timestamptz`), and(eq(webhookEvents.receivedAt, sql`${webhookCursor.preciseAt ?? webhookCursor.at.toISOString()}::timestamptz`), lt(webhookEvents.id, webhookCursor.id))) : undefined)).orderBy(desc(webhookEvents.receivedAt), desc(webhookEvents.id)).limit(51),
     db.select({ ...getTableColumns(socialItems), cursorAt: sql<string>`to_char(${socialItems.updatedAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')` }).from(socialItems).where(and(eq(socialItems.analysisStatus, "dead"), analysisCursor ? or(lt(socialItems.updatedAt, sql`${analysisCursor.preciseAt ?? analysisCursor.at.toISOString()}::timestamptz`), and(eq(socialItems.updatedAt, sql`${analysisCursor.preciseAt ?? analysisCursor.at.toISOString()}::timestamptz`), lt(socialItems.id, analysisCursor.id))) : undefined)).orderBy(desc(socialItems.updatedAt), desc(socialItems.id)).limit(51),
     db.select({ ...getTableColumns(workerHeartbeats), stale: sql<boolean>`extract(epoch from (now() - ${workerHeartbeats.lastAttemptAt})) * 1000 > ${workerHeartbeats.staleAfterMs}` }).from(workerHeartbeats),
+    db.select({ count: sql<number>`count(*)::int` }).from(watchedVideos).where(eq(watchedVideos.status, "blocked")),
   ]);
   const deadWebhooks = webhookRows.slice(0, 50);
   const deadAnalyses = analysisRows.slice(0, 50);
@@ -53,6 +54,7 @@ export default async function OperationsPage({ searchParams }: { searchParams: P
     })}</tbody></table></div><div className="panel-body small muted">Başarılı görev çalışması, her yorumun analiz edildiğini veya her alarmın teslim edildiğini kanıtlamaz. Ayrıntılar ilgili kuyrukta görünür.</div></section>
     <p className="small muted">Bu sayılar kayıtlı kuyruk durumunu gösterir; dış bağlantıların çalıştığına dair canlı kontrol değildir. Sorunu giderdikten sonra ilgili işi yeniden kuyruğa alabilirsin.</p>
     {(nc.dead ?? 0) > 0 ? <div className="notice">{nc.dead} alarm teslimatı müdahale bekliyor. <a className="text-link" href="/settings/alerts">Alarmları incele</a></div> : null}
+    {(blockedSources[0]?.count ?? 0) > 0 ? <div className="notice">{blockedSources[0].count} kaynağın yorum taraması durmuş. <a className="text-link" href="/settings/videos">Kaynak hatalarını incele</a></div> : null}
     <section className="panel" style={{marginBottom:18}}><div className="panel-head"><h2>Alınamayan yorum bildirimleri</h2><span className={`badge ${deadWebhooks.length ? "danger" : ""}`}>{deadWebhooks.length} kayıt</span></div>
       {deadWebhooks.length === 0 ? <div className="empty">Bu sayfada müdahale gerektiren bildirim kaydı yok.</div> : <div className="table-wrap"><table><thead><tr><th>Bildirim</th><th>Hata ayrıntısı</th><th>İşlem</th></tr></thead><tbody>{deadWebhooks.map((row) => <tr key={row.id}><td><div><strong>{row.objectType || "Meta"}</strong></div><div className="small muted code">{row.id}</div><div className="small muted">{row.receivedAt.toLocaleString("tr-TR", { timeZone: "Europe/Istanbul" })} · {row.attempts} deneme</div></td><td><div className="comment-text">{row.error || "Bilinmeyen hata"}</div></td><td><RequeueButton kind="webhook" id={row.id} /></td></tr>)}</tbody></table></div>}
       {webhookRows.length > 50 ? <div className="panel-body"><a className="btn" href={pageHref("webhookCursor", deadWebhooks[49].receivedAt, deadWebhooks[49].id, deadWebhooks[49].cursorAt)}>Daha eski 50 webhook</a></div> : null}

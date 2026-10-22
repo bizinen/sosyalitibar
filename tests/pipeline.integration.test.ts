@@ -1341,6 +1341,10 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
     expect(await db.query.socialItems.findFirst({ where: eq(socialItems.id, source.id) })).toMatchObject({ analysisStatus: "retry", analysisAttempts: 0 });
     const [state] = await db.select().from(analysisProviderState).where(eq(analysisProviderState.key, key));
     expect(state!.availableAt.getTime()).toBeGreaterThan(Date.now() + 590000);
+    await db.insert(analysisProviderState).values({ key: "f".repeat(64), availableAt: new Date(Date.now() + 900000), lastStatus: 401 });
+    const metricsBody = await (await metrics(new Request("http://localhost/api/metrics", { headers: { authorization: `Bearer ${env().CRON_SECRET}` } }))).text();
+    expect(Number(metricsBody.match(/sosyal_itibar_analysis_provider_backoff_seconds\{status="429"\} ([\d.]+)/)?.[1])).toBeGreaterThan(590);
+    expect(metricsBody).not.toContain('sosyal_itibar_analysis_provider_backoff_seconds{status="401"}');
     await upsertSocialItem({ platform: "facebook", externalId: "new-during-outage", text: "yeni" });
     expect(await claimAnalysisJobs(10, key)).toHaveLength(0);
     expect(fetcher).toHaveBeenCalledTimes(1);
@@ -1358,6 +1362,18 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
     const saved = await db.query.socialItems.findFirst({ where: eq(socialItems.id, source.id) });
     expect(saved).toMatchObject(status === 401 ? { analysisStatus: "retry", analysisAttempts: 0 } : { analysisStatus: "dead", analysisAttempts: 1 });
     expect(await db.select().from(analysisProviderState)).toHaveLength(status === 401 ? 1 : 0);
+  });
+
+  it("exports blocked sources and overdue collection separately from healthy worker heartbeats", async () => {
+    await db.insert(watchedVideos).values([
+      { platform: "youtube", externalId: "blocked", url: "https://example.test/blocked", status: "blocked" },
+      { platform: "youtube", externalId: "overdue", url: "https://example.test/overdue", availableAt: new Date(Date.now() - 600000), lastSyncedAt: new Date(Date.now() - 3600000) },
+    ]);
+    const response = await metrics(new Request("http://localhost/api/metrics", { headers: { authorization: `Bearer ${env().CRON_SECRET}` } }));
+    const body = await response.text();
+    expect(body).toContain('sosyal_itibar_sources{platform="youtube",provider="official",kind="video",status="blocked"} 1');
+    expect(Number(body.match(/sosyal_itibar_source_overdue_seconds\{[^\n]+\} ([\d.]+)/)?.[1])).toBeGreaterThan(590);
+    expect(Number(body.match(/sosyal_itibar_source_scan_age_seconds\{[^\n]+\} ([\d.]+)/)?.[1])).toBeGreaterThan(3590);
   });
 
   it("scrapes real PostgreSQL metrics with empty, future and runnable queues", async () => {
