@@ -9,6 +9,7 @@ import { claimWebhookJobs, processClaimedWebhook, requeueStaleWebhookLocks } fro
 import { processAnalysisJobs, claimAnalysisJobs, requeueStaleAnalysisLocks } from "@/lib/ingest";
 import { audit } from "@/lib/audit";
 import { claimAlertJobs, processClaimedAlert, requeueStaleAlertLocks } from "@/lib/alerts";
+import { analysisProviderKey } from "@/lib/batch-triage";
 
 export async function POST(req: Request) {
   if (!(await isAdmin())) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
@@ -20,7 +21,7 @@ export async function POST(req: Request) {
   const webhooks = await claimWebhookJobs(Math.min(cfg.WEBHOOK_BATCH_SIZE, cfg.WEBHOOK_CONCURRENCY));
   const webhookResults = await mapLimit(webhooks, cfg.WEBHOOK_CONCURRENCY, (job) => processClaimedWebhook(job.id, job.lockId));
   const analysisConfigured = llmConfigured(cfg);
-  const analyses = analysisConfigured ? await claimAnalysisJobs(cfg.policy.batchSize) : [];
+  const analyses = analysisConfigured ? await claimAnalysisJobs(cfg.policy.batchSize, analysisProviderKey(cfg)) : [];
   const analysisResults = await processAnalysisJobs(analyses, cfg);
   const alertCfg = await getAlertSettings();
   const alertConfigured = Boolean(alertCfg.ALERT_WEBHOOK_URL && alertCfg.ALERT_WEBHOOK_SECRET);

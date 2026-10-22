@@ -341,6 +341,13 @@ export const metaSettings = pgTable("meta_settings", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+export const analysisProviderState = pgTable("analysis_provider_state", {
+  key: text("key").primaryKey(),
+  availableAt: timestamp("available_at", { withTimezone: true }).notNull(),
+  lastStatus: integer("last_status").notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 export const aiPolicy = pgTable("ai_policy", {
   id: text("id").primaryKey(),
   settings: jsonb("settings").notNull(),

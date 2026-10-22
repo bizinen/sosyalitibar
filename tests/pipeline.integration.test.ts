@@ -1,11 +1,13 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { and, desc, eq, lt, or, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { alertOutbox, alertSettings, connectionTargets, itemReviewEvents, itemTranslations, metaAuthAccounts, oauthNonces, monitoringTargets, socialAnalyses, socialConnections, socialItems, watchedVideos, webhookEvents } from "@/db/schema";
+import { alertOutbox, alertSettings, analysisProviderState, connectionTargets, itemReviewEvents, itemTranslations, metaAuthAccounts, oauthNonces, monitoringTargets, socialAnalyses, socialConnections, socialItems, watchedVideos, webhookEvents } from "@/db/schema";
 import { encodeItemCursor, decodeItemCursor } from "@/lib/cursor";
 import { env } from "@/lib/config";
 import { decryptSecret, encryptSecret } from "@/lib/crypto";
-import { analyzeClaimedItem, beginSourceRead, claimAnalysisJobs, markSourceUnavailable, requeueStaleAnalysisLocks, upsertSocialItem } from "@/lib/ingest";
+import { analyzeClaimedItem, beginSourceRead, claimAnalysisJobs, markSourceUnavailable, processAnalysisJobs, requeueStaleAnalysisLocks, upsertSocialItem } from "@/lib/ingest";
+import { analysisProviderKey } from "@/lib/batch-triage";
+import { getLlmSettings } from "@/lib/llm-settings";
 import { claimAlertJobs, processClaimedAlert } from "@/lib/alerts";
 import { checkConnectionHealth } from "@/lib/connection-health";
 import { syncAllConnections } from "@/lib/sync";
@@ -117,7 +119,7 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
     expect(database[0]?.name).toBe("sosyal_itibar_test");
   });
   beforeEach(async () => {
-    await db.execute(sql`truncate audit_logs, webhook_events, alert_outbox, social_analyses, social_items,
+    await db.execute(sql`truncate analysis_provider_state, audit_logs, webhook_events, alert_outbox, social_analyses, social_items,
       connection_targets, social_connections, meta_auth_accounts, monitoring_targets, oauth_nonces, auth_rate_limits, alert_settings, worker_heartbeats, ai_policy, meta_settings, llm_settings, youtube_settings cascade`);
     mocks.analyze.mockReset().mockResolvedValue(result());
     mocks.debug.mockReset().mockResolvedValue({ isValid: true, scopes: ["pages_read_engagement", "pages_read_user_content", "pages_manage_metadata"], expiresAt: null });
@@ -1326,6 +1328,36 @@ describe.runIf(Boolean(process.env.TEST_DATABASE_URL))("PostgreSQL pipeline inva
     } finally { release.resolve(); await Promise.all([child, parent]); }
     const saved = await db.query.socialItems.findFirst({ where: eq(socialItems.externalId, "child") });
     expect(saved).toMatchObject({ analysisRevision: 2, analysisStatus: "pending" });
+  });
+
+  it("persists a provider cooldown across new claims without consuming item retry attempts", async () => {
+    const source = await item();
+    const cfg = await getLlmSettings();
+    const key = analysisProviderKey(cfg);
+    const jobs = await claimAnalysisJobs(1, key);
+    const fetcher = vi.fn(async () => new Response("private", { status: 429, headers: { "retry-after": "600" } }));
+    vi.stubGlobal("fetch", fetcher);
+    expect(await processAnalysisJobs(jobs, cfg)).toEqual([{ processed: false, reason: "retry" }]);
+    expect(await db.query.socialItems.findFirst({ where: eq(socialItems.id, source.id) })).toMatchObject({ analysisStatus: "retry", analysisAttempts: 0 });
+    const [state] = await db.select().from(analysisProviderState).where(eq(analysisProviderState.key, key));
+    expect(state!.availableAt.getTime()).toBeGreaterThan(Date.now() + 590000);
+    await upsertSocialItem({ platform: "facebook", externalId: "new-during-outage", text: "yeni" });
+    expect(await claimAnalysisJobs(10, key)).toHaveLength(0);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(await claimAnalysisJobs(10, analysisProviderKey({ ...cfg, LLM_API_KEY: "replacement" }))).toHaveLength(1);
+    await db.update(analysisProviderState).set({ availableAt: new Date(0) }).where(eq(analysisProviderState.key, key));
+    await db.update(socialItems).set({ analysisAvailableAt: new Date(0) }).where(eq(socialItems.id, source.id));
+    expect(await claimAnalysisJobs(1, key)).toHaveLength(1);
+  });
+
+  it.each([401, 400])("handles LLM HTTP %s according to provider versus item failure scope", async (status) => {
+    const source = await item();
+    const cfg = await getLlmSettings();
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("private", { status })));
+    await processAnalysisJobs(await claimAnalysisJobs(1), cfg);
+    const saved = await db.query.socialItems.findFirst({ where: eq(socialItems.id, source.id) });
+    expect(saved).toMatchObject(status === 401 ? { analysisStatus: "retry", analysisAttempts: 0 } : { analysisStatus: "dead", analysisAttempts: 1 });
+    expect(await db.select().from(analysisProviderState)).toHaveLength(status === 401 ? 1 : 0);
   });
 
   it("scrapes real PostgreSQL metrics with empty, future and runnable queues", async () => {

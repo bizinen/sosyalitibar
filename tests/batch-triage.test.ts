@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createBatchAnalyzer } from "@/lib/batch-triage";
+import { analysisProviderKey, BatchProviderError, createBatchAnalyzer } from "@/lib/batch-triage";
 import { defaultAiPolicy, parseTriageResults } from "@/lib/triage-contract";
 import type { getLlmSettings } from "@/lib/llm-settings";
 import { translationPromptHash } from "@/lib/translation";
@@ -16,6 +16,38 @@ function comments(init: RequestInit | undefined) {
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 describe("batched triage", () => {
+  it("retains Retry-After and stops later packets after a provider-wide rate limit", async () => {
+    const fetcher = vi.fn(async () => new Response("private", { status: 429, headers: { "retry-after": "600" } }));
+    vi.stubGlobal("fetch", fetcher);
+    const start = Date.now();
+    const analyze = createBatchAnalyzer(2, { ...cfg, policy: { ...cfg.policy, batchMaxChars: 4000 } });
+    const results = await Promise.allSettled([analyze({ ...input, text: "a".repeat(2400) }), analyze({ ...input, text: "b".repeat(2400) })]);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    for (const row of results) {
+      expect(row.status).toBe("rejected");
+      if (row.status === "rejected") {
+        expect(row.reason).toBeInstanceOf(BatchProviderError);
+        expect(row.reason).toMatchObject({ status: 429, pauseProvider: true });
+        expect(row.reason.retryAt.getTime()).toBeGreaterThanOrEqual(start + 600000);
+        expect(row.reason.message).not.toContain("private");
+      }
+    }
+  });
+
+  it("classifies configuration, transient and invalid request errors without leaking credentials", () => {
+    expect(new BatchProviderError(401)).toMatchObject({ pauseProvider: true });
+    expect(new BatchProviderError(503)).toMatchObject({ pauseProvider: true });
+    expect(new BatchProviderError(400)).toMatchObject({ pauseProvider: false });
+    const now = Date.now();
+    const date = new Date(now + 600000).toUTCString();
+    expect(new BatchProviderError(429, date).retryAt.getTime()).toBeGreaterThan(now + 598000);
+    expect(new BatchProviderError(429, "garbage").retryAt.getTime()).toBeGreaterThanOrEqual(now + 30000);
+    expect(new BatchProviderError(429, "999999999").retryAt.getTime()).toBeLessThanOrEqual(Date.now() + 86400000);
+    expect(analysisProviderKey(cfg)).toMatch(/^[a-f0-9]{64}$/);
+    expect(analysisProviderKey(cfg)).toBe(analysisProviderKey({ ...cfg, LLM_BASE_URL: `${cfg.LLM_BASE_URL}/` }));
+    expect(analysisProviderKey(cfg)).not.toBe(analysisProviderKey({ ...cfg, LLM_API_KEY: "other" }));
+  });
+
   it("uses the Runware GPT-OSS workaround without weakening strict output validation", async () => {
     const settings = { ...cfg, LLM_BASE_URL: "https://api.runware.ai/v1", LLM_MODEL: "openai:gpt-oss@120b" };
     const fetcher = vi.fn(async (_url: unknown, init?: RequestInit) => {

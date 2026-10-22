@@ -33,6 +33,7 @@ try {
     "watched_videos",
     "ai_policy",
     "youtube_settings",
+    "analysis_provider_state",
   ];
 
   const tables = await sql`

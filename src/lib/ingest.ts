@@ -1,9 +1,9 @@
 import crypto from "node:crypto";
 import { and, eq, isNull, lte, sql } from "drizzle-orm";
 import { db, type Transaction } from "@/lib/db";
-import { alertOutbox, connectionTargets, monitoringTargets, socialAnalyses, socialConnections, socialItems, watchedVideos } from "@/db/schema";
+import { alertOutbox, analysisProviderState, connectionTargets, monitoringTargets, socialAnalyses, socialConnections, socialItems, watchedVideos } from "@/db/schema";
 import { analyzeComment, type AnalyzeCommentInput, type LlmResult } from "@/lib/llm";
-import { createBatchAnalyzer, type TriageResult } from "@/lib/batch-triage";
+import { analysisProviderKey, BatchProviderError, createBatchAnalyzer, type TriageResult } from "@/lib/batch-triage";
 import type { getLlmSettings } from "@/lib/llm-settings";
 import { mapLimit } from "@/lib/concurrency";
 import { log, safeErrorMessage } from "@/lib/log";
@@ -340,14 +340,15 @@ export async function analyzeClaimedItem(itemId: string, lockId: string, analyze
     }
     return persisted ? { processed: true as const } : { processed: false as const, reason: "lost_lock" };
   } catch (error) {
-    const attempts = item.analysisAttempts + 1;
-    const dead = attempts >= 5;
-    const delayMs = Math.min(60 * 60 * 1000, 30_000 * 2 ** Math.max(0, attempts - 1));
+    const providerPause = error instanceof BatchProviderError && error.pauseProvider;
+    const attempts = item.analysisAttempts + (providerPause ? 0 : 1);
+    const dead = !providerPause && (attempts >= 5 || error instanceof BatchProviderError);
+    const delayMs = Math.min(60 * 60 * 1000, 30_000 * 2 ** Math.max(0, attempts - 1)) * (1 + Math.random() * 0.2);
     const message = safeErrorMessage(error);
     const changed = await db.update(socialItems).set({
       analysisStatus: dead ? "dead" : "retry",
       analysisAttempts: attempts,
-      analysisAvailableAt: dead ? new Date() : new Date(Date.now() + delayMs),
+      analysisAvailableAt: dead ? new Date() : new Date(Math.max(Date.now() + delayMs, providerPause ? error.retryAt.getTime() : 0)),
       analysisLockedAt: null,
       analysisLockId: null,
       analysisError: message,
@@ -363,12 +364,24 @@ export async function analyzeClaimedItem(itemId: string, lockId: string, analyze
 
 export async function processAnalysisJobs(jobs: Array<{ id: string; lockId: string }>, cfg: Awaited<ReturnType<typeof getLlmSettings>>) {
   const analyzer = createBatchAnalyzer(jobs.length, cfg);
+  let cooldownWrite: Promise<unknown> | undefined;
+  const analyze = (input: AnalyzeCommentInput) => analyzer(input).catch(async (error: unknown) => {
+    if (error instanceof BatchProviderError && error.pauseProvider) {
+      cooldownWrite ??= db.insert(analysisProviderState).values({ key: analysisProviderKey(cfg), availableAt: error.retryAt, lastStatus: error.status })
+        .onConflictDoUpdate({ target: analysisProviderState.key, set: {
+          availableAt: sql`greatest(${analysisProviderState.availableAt}, ${error.retryAt.toISOString()}::timestamptz)`,
+          lastStatus: error.status, updatedAt: new Date(),
+        } }).then(() => undefined);
+      await cooldownWrite;
+    }
+    throw error;
+  });
   const completions: Array<Promise<Awaited<ReturnType<typeof analyzeClaimedItem>>>> = [];
   // Bound context reads separately from waiting for the shared provider response.
   await mapLimit(jobs, cfg.ANALYSIS_CONCURRENCY, (job) => new Promise<void>((ready) => {
     const work = analyzeClaimedItem(job.id, job.lockId, (input) => {
       ready();
-      return analyzer(input);
+      return analyze(input);
     });
     completions.push(work);
     void work.then(() => ready(), () => ready());
@@ -376,12 +389,13 @@ export async function processAnalysisJobs(jobs: Array<{ id: string; lockId: stri
   return mapLimit(completions, cfg.ANALYSIS_CONCURRENCY, (work) => work);
 }
 
-export async function claimAnalysisJobs(limit = 20): Promise<Array<{ id: string; lockId: string }>> {
+export async function claimAnalysisJobs(limit = 20, providerKey?: string): Promise<Array<{ id: string; lockId: string }>> {
   const now = new Date().toISOString();
   const rows = await db.execute(sql`
     with candidates as materialized (
       select id from social_items where analysis_status in ('pending', 'retry') and not analysis_excluded
         and analysis_available_at <= ${now}::timestamptz
+        ${providerKey ? sql`and not exists (select 1 from analysis_provider_state where key = ${providerKey} and available_at > ${now}::timestamptz)` : sql``}
       order by analysis_available_at, ingested_at, id for update skip locked limit ${Math.max(1, Math.min(limit, 50))}
     ) update social_items as item set analysis_status = 'processing', analysis_locked_at = ${now}::timestamptz,
       analysis_lock_id = gen_random_uuid(), updated_at = ${now}::timestamptz
